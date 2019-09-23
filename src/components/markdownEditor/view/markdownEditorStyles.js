@@ -1,6 +1,20 @@
 import EStyleSheet from 'react-native-extended-stylesheet';
 
 export default EStyleSheet.create({
+  containerStyle: {
+    flex: 1,
+  },
+  toolbarContainer: {
+    height: 56,
+    flexDirection: 'row',
+    backgroundColor: 'silver',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+  },
+  controlButtonContainer: {
+    padding: 8,
+    borderRadius: 2,
+  },
   container: {
     flex: 1,
     flexDirection: 'column',

@@ -1,7 +1,7 @@
-import React, { Component } from 'react';
-import { View, KeyboardAvoidingView, FlatList, Text, Platform, ScrollView } from 'react-native';
+import React, { useState, useEffect, Component } from 'react';
+import { View, Text, FlatList, TouchableOpacity } from 'react-native';
 import ActionSheet from 'react-native-actionsheet';
-import { renderPostBody } from '@esteemapp/esteem-render-helpers';
+import RNDraftView from '../../react-native-draftjs';
 
 // Utils
 import applyImageLink from './formats/applyWebLinkFormat';
@@ -9,260 +9,265 @@ import Formats from './formats/formats';
 
 // Components
 import { IconButton } from '../../iconButton';
-import { PostBody } from '../../postElements';
 import { StickyBar } from '../../basicUIElements';
-import { TextInput } from '../../textInput';
 
-// Styles
 import styles from './markdownEditorStyles';
 
-export default class MarkdownEditorView extends Component {
+// const ControlButton = ({ text, action, isActive }) => {
+//   return (
+//     <TouchableOpacity
+//       style={[styles.controlButtonContainer, isActive ? { backgroundColor: 'gold' } : {}]}
+//       onPress={action}
+//     >
+//       <Text>{text}</Text>
+//     </TouchableOpacity>
+//   );
+// };
+
+// const EditorToolBar = ({ activeStyles, blockType, toggleStyle, toggleBlockType }) => {
+//   return (
+//     <View style={styles.toolbarContainer}>
+//       <ControlButton
+//         text={'B'}
+//         isActive={activeStyles.includes('BOLD')}
+//         action={() => toggleStyle('BOLD')}
+//       />
+//       <ControlButton
+//         text={'I'}
+//         isActive={activeStyles.includes('ITALIC')}
+//         action={() => toggleStyle('ITALIC')}
+//       />
+//       <ControlButton
+//         text={'H'}
+//         isActive={blockType === 'header-one'}
+//         action={() => toggleBlockType('header-one')}
+//       />
+//       <ControlButton
+//         text={'ul'}
+//         isActive={blockType === 'unordered-list-item'}
+//         action={() => toggleBlockType('unordered-list-item')}
+//       />
+//       <ControlButton
+//         text={'ol'}
+//         isActive={blockType === 'ordered-list-item'}
+//         action={() => toggleBlockType('ordered-list-item')}
+//       />
+//       <ControlButton
+//         text={'--'}
+//         isActive={activeStyles.includes('STRIKETHROUGH')}
+//         action={() => toggleStyle('STRIKETHROUGH')}
+//       />
+//       <ControlButton
+//         text={'ul'}
+//         isActive={blockType === 'unordered-list-item'}
+//         action={() => toggleBlockType('unordered-list-item')}
+//       />
+//       <ControlButton
+//         text={'ol'}
+//         isActive={blockType === 'ordered-list-item'}
+//         action={() => toggleBlockType('ordered-list-item')}
+//       />
+//       <ControlButton
+//         text={'--'}
+//         isActive={activeStyles.includes('STRIKETHROUGH')}
+//         action={() => toggleStyle('STRIKETHROUGH')}
+//       />
+//     </View>
+//   );
+// };
+
+const MarkupButton = ({ item, onPress }) => (
+  <View style={styles.buttonWrapper}>
+    <IconButton
+      size={20}
+      style={styles.editorButton}
+      iconStyle={styles.icon}
+      iconType={item.iconType}
+      name={item.icon}
+      onPress={onPress}
+    />
+  </View>
+);
+
+class EditorButtons extends Component {
   constructor(props) {
     super(props);
-    this.state = {
-      text: props.draftBody || '',
-      selection: { start: 0, end: 0 },
-      textUpdated: false,
-      newSelection: null,
-    };
-
-    this.inputRef = React.createRef();
-    this.galleryRef = React.createRef();
-    this.clearRef = React.createRef();
+    this.state = {};
   }
 
-  // Lifecycle functions
-  componentWillReceiveProps(nextProps) {
-    const { draftBody, uploadedImage, isPreviewActive } = this.props;
-    if (!nextProps.isPreviewActive && isPreviewActive) {
-      this.setState({
-        selection: { start: 0, end: 0 },
-      });
+  test = (key, type) => {
+    const { toggleStyle, toggleBlockType } = this.props;
+    if (type === 'style') {
+      toggleStyle(key);
+    } else if (type === 'block') {
+      toggleBlockType(key);
     }
-    if (nextProps.draftBody && draftBody !== nextProps.draftBody) {
-      this.setState({
-        text: nextProps.draftBody,
-      });
-    }
-
-    if (
-      nextProps.uploadedImage &&
-      nextProps.uploadedImage.url &&
-      nextProps.uploadedImage !== uploadedImage
-    ) {
-      applyImageLink({
-        getState: this._getState,
-        setState: async (state, callback) => {
-          await this.setState(state, callback);
-        },
-        item: { url: nextProps.uploadedImage.url, text: nextProps.uploadedImage.hash },
-        isImage: !!nextProps.uploadedImage,
-      });
-    }
-  }
-
-  componentDidUpdate(prevProps, prevState) {
-    const { text } = this.state;
-    const { handleIsFormValid } = this.props;
-
-    if (prevState.text !== text) {
-      const nextText = text.replace(prevState.text, '');
-
-      if (nextText && nextText.length > 0) {
-        this._changeText(text);
-
-        if (handleIsFormValid) {
-          handleIsFormValid(text);
-        }
-      }
-    }
-  }
-
-  // Component functions
-  _changeText = input => {
-    const { onChange, handleOnTextChange, handleIsValid, componentID } = this.props;
-
-    this.setState({ text: input });
-
-    if (onChange) {
-      onChange(input);
-    }
-
-    if (handleIsValid) {
-      handleIsValid(componentID, !!(input && input.length));
-    }
-
-    if (handleOnTextChange) {
-      handleOnTextChange(input);
-    }
-  };
-
-  _handleOnSelectionChange = event => {
-    const { newSelection } = this.state;
-
-    if (newSelection) {
-      this.setState({
-        selection: newSelection,
-        newSelection: null,
-      });
-      return;
-    }
-    this.setState({
-      selection: event.nativeEvent.selection,
-    });
-  };
-
-  _getState = () => {
-    return this.state;
-  };
-
-  _renderPreview = () => {
-    const { text } = this.state;
-
-    return (
-      <ScrollView style={styles.previewContainer}>
-        {text ? <PostBody body={renderPostBody(text)} /> : <Text>...</Text>}
-      </ScrollView>
-    );
-  };
-
-  _renderMarkupButton = ({ item, getState, setState }) => (
-    <View style={styles.buttonWrapper}>
-      <IconButton
-        size={20}
-        style={styles.editorButton}
-        iconStyle={styles.icon}
-        iconType={item.iconType}
-        name={item.icon}
-        onPress={() => item.onPress({ getState, setState, item })}
-      />
-    </View>
-  );
-
-  _renderEditorButtons = ({ getState, setState }) => (
-    <StickyBar>
-      <View style={styles.leftButtonsWrapper}>
-        <FlatList
-          data={Formats}
-          keyboardShouldPersistTaps="always"
-          renderItem={({ item, index }) =>
-            index !== 9 && this._renderMarkupButton({ item, getState, setState })
-          }
-          horizontal
-        />
-      </View>
-      <View style={styles.rightButtonsWrapper}>
-        <IconButton
-          size={20}
-          style={styles.rightIcons}
-          iconStyle={styles.icon}
-          iconType="FontAwesome"
-          name="link"
-          onPress={() => Formats[9].onPress({ getState, setState })}
-        />
-        <IconButton
-          onPress={() => this.galleryRef.current.show()}
-          style={styles.rightIcons}
-          size={20}
-          iconStyle={styles.icon}
-          iconType="FontAwesome"
-          name="image"
-        />
-        <View style={styles.clearButtonWrapper}>
-          <IconButton
-            onPress={() => this.clearRef.current.show()}
-            size={20}
-            iconStyle={styles.clearIcon}
-            iconType="FontAwesome"
-            name="trash"
-            backgroundColor={styles.clearButtonWrapper.backgroundColor}
-          />
-        </View>
-      </View>
-    </StickyBar>
-  );
-
-  _handleClear = () => {
-    const { initialFields } = this.props;
-
-    initialFields();
-
-    this.setState({ text: '' });
   };
 
   render() {
-    const { handleOpenImagePicker, intl, isPreviewActive, isReply, isLoading } = this.props;
-    const { text, selection } = this.state;
-
     return (
-      <KeyboardAvoidingView
-        style={styles.container}
-        keyboardVerticalOffset={Platform.select({ ios: 0, android: 25 })}
-        behavior={Platform.OS === 'ios' ? 'padding' : null}
-      >
-        {!isPreviewActive ? (
-          <TextInput
-            multiline
-            onChangeText={this._changeText}
-            onSelectionChange={this._handleOnSelectionChange}
-            placeholder={intl.formatMessage({
-              id: isReply ? 'editor.reply_placeholder' : 'editor.default_placeholder',
-            })}
-            placeholderTextColor="#c1c5c7"
-            selection={selection}
-            selectionColor="#357ce6"
-            style={styles.textWrapper}
-            underlineColorAndroid="transparent"
-            value={text}
-            innerRef={this.inputRef}
-            editable={!isLoading}
+      <StickyBar>
+        <View style={styles.leftButtonsWrapper}>
+          <FlatList
+            data={Formats}
+            keyboardShouldPersistTaps="always"
+            renderItem={({ item }) => (
+              <MarkupButton item={item} onPress={() => this.test(item.key, item.type)} />
+            )}
+            horizontal
           />
-        ) : (
-          this._renderPreview()
-        )}
-        {!isPreviewActive &&
-          this._renderEditorButtons({
-            getState: this._getState,
-            setState: (state, callback) => {
-              this.inputRef.current.focus();
-              this.setState(state, callback);
-            },
-          })}
-        <ActionSheet
-          ref={this.galleryRef}
-          options={[
-            intl.formatMessage({
-              id: 'editor.open_gallery',
-            }),
-            intl.formatMessage({
-              id: 'editor.capture_photo',
-            }),
-            intl.formatMessage({
-              id: 'alert.cancel',
-            }),
-          ]}
-          cancelButtonIndex={2}
-          onPress={index => {
-            handleOpenImagePicker(index === 0 ? 'image' : index === 1 && 'camera');
-          }}
-        />
-        <ActionSheet
-          ref={this.clearRef}
-          title={intl.formatMessage({
-            id: 'alert.clear_alert',
-          })}
-          options={[
-            intl.formatMessage({
-              id: 'alert.clear',
-            }),
-            intl.formatMessage({
-              id: 'alert.cancel',
-            }),
-          ]}
-          cancelButtonIndex={1}
-          onPress={index => index === 0 && this._handleClear()}
-        />
-      </KeyboardAvoidingView>
+        </View>
+        <View style={styles.rightButtonsWrapper}>
+          {/* <IconButton
+        size={20}
+        style={styles.rightIcons}
+        iconStyle={styles.icon}
+        iconType="FontAwesome"
+        name="link"
+        onPress={() => Formats[9].onPress({ getState, setState })}
+      /> */}
+          <IconButton
+            onPress={() => this.galleryRef.current.show()}
+            style={styles.rightIcons}
+            size={20}
+            iconStyle={styles.icon}
+            iconType="FontAwesome"
+            name="image"
+          />
+          {/* <ControlButton
+            text={'B'}
+            isActive={activeStyles.includes('BOLD')}
+            action={() => toggleStyle('BOLD')}
+          /> */}
+          <View style={styles.clearButtonWrapper}>
+            <IconButton
+              onPress={() => this.clearRef.current.show()}
+              size={20}
+              iconStyle={styles.clearIcon}
+              iconType="FontAwesome"
+              name="trash"
+              backgroundColor={styles.clearButtonWrapper.backgroundColor}
+            />
+          </View>
+        </View>
+      </StickyBar>
     );
   }
 }
+
+// const EditorButtons = ({ activeStyles, blockType, toggleStyle, toggleBlockType }) => {
+//   const test = key => {
+//     toggleStyle('BOLD');
+//   };
+//   return (
+//     <StickyBar>
+//       <View style={styles.leftButtonsWrapper}>
+//         <FlatList
+//           data={Formats}
+//           keyboardShouldPersistTaps="always"
+//           renderItem={function({ item }) {
+//             return (
+//               <MarkupButton
+//                 item={item}
+//                 activeStyles={activeStyles}
+//                 blockType={blockType}
+//                 toggleStyle={toggleStyle}
+//                 toggleBlockType={toggleBlockType}
+//                 onPress={test}
+//               />
+//             );
+//           }}
+//           horizontal
+//         />
+//       </View>
+//       <View style={styles.rightButtonsWrapper}>
+//         {/* <IconButton
+//         size={20}
+//         style={styles.rightIcons}
+//         iconStyle={styles.icon}
+//         iconType="FontAwesome"
+//         name="link"
+//         onPress={() => Formats[9].onPress({ getState, setState })}
+//       /> */}
+//         <IconButton
+//           onPress={() => this.galleryRef.current.show()}
+//           style={styles.rightIcons}
+//           size={20}
+//           iconStyle={styles.icon}
+//           iconType="FontAwesome"
+//           name="image"
+//         />
+//         <ControlButton
+//           text={'B'}
+//           isActive={activeStyles.includes('BOLD')}
+//           action={() => toggleStyle('BOLD')}
+//         />
+//         <View style={styles.clearButtonWrapper}>
+//           <IconButton
+//             onPress={() => this.clearRef.current.show()}
+//             size={20}
+//             iconStyle={styles.clearIcon}
+//             iconType="FontAwesome"
+//             name="trash"
+//             backgroundColor={styles.clearButtonWrapper.backgroundColor}
+//           />
+//         </View>
+//       </View>
+//     </StickyBar>
+//   );
+// };
+
+const styleMap = {
+  STRIKETHROUGH: {
+    textDecoration: 'line-through',
+  },
+};
+
+const App = () => {
+  const _draftRef = React.createRef();
+  const [activeStyles, setActiveStyles] = useState([]);
+  const [blockType, setActiveBlockType] = useState('unstyled');
+  const [editorState, setEditorState] = useState('');
+
+  const editorLoaded = () => {
+    _draftRef.current && _draftRef.current.focus();
+  };
+
+  const toggleStyle = style => {
+    _draftRef.current && _draftRef.current.setStyle(style);
+  };
+
+  const toggleBlockType = type => {
+    _draftRef.current && _draftRef.current.setBlockType(type);
+  };
+
+  useEffect(() => {
+    /**
+     * Get the current editor state in HTML.
+     * Usually keep it in the submit or next action to get output after user has typed.
+     */
+    setEditorState(_draftRef.current ? _draftRef.current.getEditorState() : '');
+  }, [_draftRef]);
+
+  return (
+    <View style={styles.containerStyle}>
+      <RNDraftView
+        onEditorReady={editorLoaded}
+        style={{ flex: 1 }}
+        placeholder={'Add text here...'}
+        ref={_draftRef}
+        onStyleChanged={setActiveStyles}
+        onBlockTypeChanged={setActiveBlockType}
+        styleMap={styleMap}
+      />
+      <EditorButtons
+        activeStyles={activeStyles}
+        blockType={blockType}
+        toggleStyle={toggleStyle}
+        toggleBlockType={toggleBlockType}
+      />
+    </View>
+  );
+};
+
+export default App;
