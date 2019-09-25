@@ -43,15 +43,14 @@ export default [
     title: 'U',
     icon: 'underline',
     iconType: 'FontAwesome',
-    type: 'block',
+    type: 'style',
   },
   {
-    key: 'S',
+    key: 'STRIKETHROUGH',
     title: 'S',
     wrapper: '~~',
     icon: 'strikethrough',
-    iconType: 'FontAwesome',
-    onPress: applyWrapFormat,
+    type: 'style',
   },
   {
     key: '>',
