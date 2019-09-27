@@ -53,7 +53,16 @@ class PercentBarView extends PureComponent {
   };
 
   render() {
-    const { percent, margin, text, barColor, barPercentColor, textColor, isTop } = this.props;
+    const {
+      percent,
+      margin,
+      text,
+      barColor,
+      barPercentColor,
+      textColor,
+      isTop,
+      secondText,
+    } = this.props;
 
     return (
       <View>
@@ -68,6 +77,7 @@ class PercentBarView extends PureComponent {
           />
         </View>
         {this._getText(textColor, text, isTop, false)}
+        {this._getText(textColor, secondText, isTop, false)}
       </View>
     );
   }

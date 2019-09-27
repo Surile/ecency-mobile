@@ -128,6 +128,9 @@ class ProfileView extends PureComponent {
                 handleUIChange={this._handleUIChange}
                 hoursRC={Math.ceil((100 - resourceCredits) * 0.833333) || null}
                 hoursVP={Math.ceil((100 - votingPower) * 0.833333) || null}
+                RCComment={Math.floor(resourceCredits / 1) || 0}
+                RCVotes={Math.floor(resourceCredits / 0.066) || 0}
+                RCTransfers={Math.floor(resourceCredits / 0.17) || 0}
                 intl={intl}
                 isDarkTheme={isDarkTheme}
                 isFavorite={isFavorite}

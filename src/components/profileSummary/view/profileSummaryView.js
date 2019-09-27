@@ -83,12 +83,16 @@ class ProfileSummaryView extends PureComponent {
       isProfileLoading,
       percentRC,
       percentVP,
+      RCComment,
+      RCVotes,
+      RCTransfers,
     } = this.props;
     const dropdownOptions = [];
     const votingPowerHoursText = hoursVP && `• Full in ${hoursVP} hours`;
     const votingPowerText = `Voting power: ${percentVP}% ${votingPowerHoursText || ''}`;
     const rcPowerHoursText = hoursRC && `• Full in ${hoursRC} hours`;
     const rcPowerText = `RCs: ${percentRC}% ${rcPowerHoursText || ''}`;
+    const rcEnoughText = `Enough For: ${RCComment} comments • ${RCVotes} votes • ${RCTransfers} transfers`;
     const link = get(about, 'website', '');
     const location = get(about, 'location', '');
 
@@ -160,6 +164,7 @@ class ProfileSummaryView extends PureComponent {
             textColor="#11c28b"
             isTop={false}
             text={rcPowerText}
+            secondText={rcEnoughText}
           />
         </TouchableOpacity>
         <View style={styles.footer}>

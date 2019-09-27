@@ -151,6 +151,10 @@ export const getUser = async user => {
       get(globalProperties, 'total_vesting_fund_steem'),
     );
 
+    console.log('client :', client);
+    const test = client.rc;
+    console.log('test :', test);
+
     _account.about = has(_account, 'json_metadata') && JSON.parse(get(_account, 'json_metadata'));
     _account.avatar = getAvatar(get(_account, 'about'));
     _account.display_name = getName(get(_account, 'about'));

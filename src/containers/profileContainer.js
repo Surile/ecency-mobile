@@ -22,7 +22,12 @@ import {
 import { getIsFavorite, addFavorite, removeFavorite } from '../providers/esteem/esteem';
 
 // Utilitites
-import { getRcPower, getVotingPower } from '../utils/manaBar';
+import {
+  getRcPowerPercent,
+  getVotingPowerPercent,
+  getRcPower,
+  getVotingPower,
+} from '../utils/manaBar';
 
 // Constants
 import { default as ROUTES } from '../constants/routeNames';
@@ -338,10 +343,19 @@ class ProfileContainer extends Component {
 
     let votingPower;
     let resourceCredits;
+    let RCComment;
+    let RCVotes;
+    let RCTransfers;
 
     if (user) {
-      votingPower = getVotingPower(user).toFixed(1);
-      resourceCredits = getRcPower(user).toFixed(1);
+      votingPower = getVotingPowerPercent(user).toFixed(1);
+      resourceCredits = getRcPowerPercent(user).toFixed(1);
+      const rcPower = getRcPower(user);
+      RCComment = rcPower / 1000000;
+      RCVotes = rcPower / 66000;
+      RCTransfers = rcPower / 170000;
+      //     getRcPower,
+      // getVotingPower,
     }
 
     return (
