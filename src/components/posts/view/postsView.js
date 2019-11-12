@@ -102,9 +102,7 @@ const PostsView = ({
 
   useEffect(() => {
     if (!startAuthor && !startPermlink) {
-      _loadPosts(
-        filterOptions && filterOptions.length > 0 && filterOptionsValue[selectedFilterIndex],
-      );
+      _loadPosts();
     }
   }, [
     _loadPosts,
@@ -149,7 +147,7 @@ const PostsView = ({
       if (isLoading) {
         return;
       } else {
-        setIsLoading(true);
+        // setIsLoading(true);
       }
 
       const filter =
@@ -233,8 +231,7 @@ const PostsView = ({
               }
               // Promoted post end
 
-              if (refreshing) {
-              } else if (!refreshing) {
+              if (!refreshing) {
                 setStartAuthor(result[result.length - 1] && result[result.length - 1].author);
                 setStartPermlink(result[result.length - 1] && result[result.length - 1].permlink);
               }
@@ -248,6 +245,7 @@ const PostsView = ({
         })
         .catch(() => {
           setRefreshing(false);
+          setIsLoading(false);
         });
     },
     [
@@ -295,30 +293,20 @@ const PostsView = ({
   };
 
   const _renderEmptyContent = () => {
-    if (getFor === 'feed' && isLoginDone && !isLoggedIn) {
+    if (
+      (filterOptions[selectedFilterIndex] === 'BLOG' ||
+        filterOptions[selectedFilterIndex] === 'FEED') &&
+      !isLoading
+    ) {
       return (
         <NoPost
           imageStyle={styles.noImage}
-          isButtonText
+          name={isLoggedIn && tag}
+          isButtonText={!isLoggedIn}
           defaultText={intl.formatMessage({
-            id: 'profile.login_to_see',
+            id: isLoggedIn ? 'profile.havent_posted' : 'profile.login_to_see',
           })}
-          handleOnButtonPress={_handleOnPressLogin}
-        />
-      );
-    }
-
-    if (isNoPost) {
-      return (
-        <NoPost
-          imageStyle={styles.noImage}
-          name={tag}
-          text={intl.formatMessage({
-            id: 'profile.havent_posted',
-          })}
-          defaultText={intl.formatMessage({
-            id: 'profile.login_to_see',
-          })}
+          handleOnButtonPress={!isLoggedIn && _handleOnPressLogin}
         />
       );
     }
