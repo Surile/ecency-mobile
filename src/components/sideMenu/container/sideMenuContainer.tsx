@@ -1,28 +1,34 @@
 import React, { useEffect } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { useDispatch } from 'react-redux';
 
 // Actions
 import { useDrawerStatus } from '@react-navigation/drawer';
-import { logout, toggleAccountsBottomSheet } from '../../../redux/actions/uiAction';
+import { SheetManager } from 'react-native-actions-sheet';
+import * as Sentry from '@sentry/react-native';
+import { getAccountFullQueryOptions } from '@ecency/sdk';
+import { useQueryClient } from '@tanstack/react-query';
+import { logout } from '../../../redux/actions/uiAction';
 import { setInitPosts, setFeedPosts } from '../../../redux/actions/postsAction';
 
 // Component
 import SideMenuView from '../view/sideMenuView';
 import { updateCurrentAccount } from '../../../redux/actions/accountAction';
-import { getUser } from '../../../providers/hive/dhive';
-import bugsnapInstance from '../../../config/bugsnag';
+import { SheetNames } from '../../../navigation/sheets';
+import {
+  selectIsLoggedIn,
+  selectCurrentAccount,
+  selectPrevLoggedInUsers,
+} from '../../../redux/selectors';
+import { useAppSelector } from '../../../hooks';
 
-const SideMenuContainer = ({ navigation }) => {
+const SideMenuContainer = ({ navigation }: any) => {
   const dispatch = useDispatch();
   const drawerStatus = useDrawerStatus();
+  const queryClient = useQueryClient();
 
-  const isLoggedIn = useSelector((state) => state.application.isLoggedIn);
-  const currentAccount = useSelector((state) => state.account.currentAccount);
-  const prevLoggedInUsers = useSelector((state) => state.account.prevLoggedInUsers);
-
-  const isVisibleAccountsBottomSheet = useSelector(
-    (state) => state.ui.isVisibleAccountsBottomSheet,
-  );
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const prevLoggedInUsers = useAppSelector(selectPrevLoggedInUsers);
 
   useEffect(() => {
     if (drawerStatus === 'open') {
@@ -34,15 +40,17 @@ const SideMenuContainer = ({ navigation }) => {
   // fetches and update user data
   const _updateUserData = async () => {
     try {
-      if (currentAccount?.username) {
-        const accountData = await getUser(currentAccount.username);
+      if (currentAccount?.name) {
+        const accountData = await queryClient.fetchQuery(
+          getAccountFullQueryOptions(currentAccount.name),
+        );
         if (accountData) {
           dispatch(updateCurrentAccount({ ...currentAccount, ...accountData }));
         }
       }
     } catch (err) {
       console.warn('failed to update user data');
-      bugsnapInstance.notify(err);
+      Sentry.captureException(err);
     }
   };
 
@@ -60,9 +68,9 @@ const SideMenuContainer = ({ navigation }) => {
     dispatch(logout());
   };
 
-  const _handlePressOptions = () => {
+  const _handleShowAccountsSheet = () => {
+    SheetManager.show(SheetNames.ACCOUNTS_SHEET);
     navigation.closeDrawer();
-    dispatch(toggleAccountsBottomSheet(!isVisibleAccountsBottomSheet));
   };
 
   return (
@@ -72,9 +80,8 @@ const SideMenuContainer = ({ navigation }) => {
       userAvatar={null}
       currentAccount={currentAccount}
       handleLogout={_handleLogout}
-      handlePressOptions={_handlePressOptions}
+      handleShowAccountsSheet={_handleShowAccountsSheet}
       prevLoggedInUsers={prevLoggedInUsers}
-      isVisibleAccountsBottomSheet={isVisibleAccountsBottomSheet}
     />
   );
 };

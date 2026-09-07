@@ -9,33 +9,45 @@ import { TextWithIcon } from '../../basicUIElements';
 import { Icon } from '../../icon';
 
 // Styles
-import styles from './postCardStyles';
+import styles from '../styles/children.styles';
 import { IconButton } from '../..';
 import { getTimeFromNow } from '../../../utils/time';
 import { PostCardActionIds } from '../container/postCard';
 import { ContentType } from '../../../providers/hive/hive.types';
+import CrossPostLabel from './crossPostLabel';
+import { useMinuteTicker } from '../../../hooks/useMinuteTicker';
 
 interface Props {
   intl: IntlShape;
   content: any;
-  isHideImage: boolean;
   pageType?: 'main' | 'community' | 'profile' | 'ownProfile';
   handleCardInteraction: (id: PostCardActionIds, payload?: any) => void;
 }
 
-export const PostCardHeader = ({
-  intl,
-  content,
-  pageType,
-  isHideImage,
-  handleCardInteraction,
-}: Props) => {
+const PostCardHeaderComponent = ({ intl, content, pageType, handleCardInteraction }: Props) => {
   const rebloggedBy = get(content, 'reblogged_by[0]', null);
-  const dateString = useMemo(() => getTimeFromNow(content?.created), [content]);
+
+  // Single shared timer across all PostCards (no per-card interval)
+  const minuteTick = useMinuteTicker();
+
+  const dateString = useMemo(() => getTimeFromNow(content?.created), [content, minuteTick]);
   const _isPollPost =
     content?.json_metadata?.content_type === ContentType.POLL && !!content?.json_metadata?.question;
 
-  const _handleOnTagPress = (navParams) => {
+  // Show the Ecency source badge when the post was published from an Ecency
+  // client (e.g. ecency/x-vision, ecency-mobile). Mirrors the comment/wave
+  // badge; only an explicit "ecency" app matches (not a missing app). Anchor to
+  // the start so lookalikes like "notecency/..." don't falsely match.
+  const _isFromEcency = useMemo(
+    () =>
+      String(content?.json_metadata?.app || '')
+        .split('/')[0]
+        .toLowerCase()
+        .startsWith('ecency'),
+    [content],
+  );
+
+  const _handleOnTagPress = (navParams: any) => {
     handleCardInteraction(PostCardActionIds.NAVIGATE, navParams);
   };
 
@@ -56,16 +68,20 @@ export const PostCardHeader = ({
           iconType="MaterialIcons"
           iconName="repeat"
           iconSize={16}
-          textStyle={styles.reblogText}
+          textStyle={styles.repostText}
           isClickable={true}
           onPress={() => handleCardInteraction(PostCardActionIds.USER, rebloggedBy)}
         />
       )}
 
+      <CrossPostLabel
+        crosspostMeta={content?.crosspostMeta}
+        handleCardInteraction={handleCardInteraction}
+      />
+
       <View style={styles.bodyHeader}>
         <PostHeaderDescription
           date={dateString}
-          isHideImage={isHideImage}
           name={get(content, 'author')}
           profileOnPress={() => handleCardInteraction(PostCardActionIds.USER, content.author)}
           handleOnTagPress={_handleOnTagPress}
@@ -74,6 +90,7 @@ export const PostCardHeader = ({
           content={content}
           rebloggedBy={rebloggedBy}
           isPromoted={get(content, 'is_promoted')}
+          isFromEcency={_isFromEcency}
         />
 
         <View style={styles.headerIconsWrapper}>
@@ -95,12 +112,26 @@ export const PostCardHeader = ({
             style={styles.optionsIconContainer}
             iconStyle={styles.optionsIcon}
             iconType="MaterialCommunityIcons"
-            name="dots-vertical"
+            name="dots-horizontal"
             onPress={() => handleCardInteraction(PostCardActionIds.OPTIONS)}
             size={24}
+            accessibilityLabel={intl.formatMessage({
+              id: 'post.a11y_post_options',
+              defaultMessage: 'Post options',
+            })}
           />
         </View>
       </View>
     </>
   );
 };
+
+// Memoize to prevent re-renders when content hasn't changed
+export const PostCardHeader = React.memo(PostCardHeaderComponent, (prevProps, nextProps) => {
+  return (
+    prevProps.content === nextProps.content &&
+    prevProps.pageType === nextProps.pageType &&
+    prevProps.intl === nextProps.intl &&
+    prevProps.handleCardInteraction === nextProps.handleCardInteraction
+  );
+});

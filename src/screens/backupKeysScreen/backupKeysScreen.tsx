@@ -6,7 +6,8 @@ import get from 'lodash/get';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { BasicHeader, TextBoxWithCopy } from '../../components';
 import { useAppSelector } from '../../hooks';
-import { getDigitPinCode } from '../../providers/hive/dhive';
+import { selectCurrentAccount, selectPin } from '../../redux/selectors';
+import { getDigitPinCode } from '../../providers/hive/hive';
 import AUTH_TYPE from '../../constants/authType';
 import { ImportPrivateKeyModalModal } from './importPrivateKeyModal';
 
@@ -18,9 +19,9 @@ import { decryptKey } from '../../utils/crypto';
 
 const BackupKeysScreen = () => {
   const intl = useIntl();
-  const importKeyModalRef = useRef(null);
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const pinCode = useAppSelector((state) => state.application.pin);
+  const importKeyModalRef = useRef<any>(null);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const pinCode = useAppSelector(selectPin);
   const digitPinCode = getDigitPinCode(pinCode);
 
   const [ownerKey, setOwnerKey] = useState('');
@@ -33,10 +34,10 @@ const BackupKeysScreen = () => {
   const [revealMemoKey, setRevealMemoKey] = useState(false);
 
   const publicKeys = {
-    activeKey: get(currentAccount, 'active.key_auths', []).map((x) => x[0])[0],
+    activeKey: get(currentAccount, 'active.key_auths', []).map((x: any) => x[0])[0],
     memoKey: get(currentAccount, 'memo_key', ''),
-    ownerKey: get(currentAccount, 'owner.key_auths', []).map((x) => x[0])[0],
-    postingKey: get(currentAccount, 'posting.key_auths', []).map((x) => x[0])[0],
+    ownerKey: get(currentAccount, 'owner.key_auths', []).map((x: any) => x[0])[0],
+    postingKey: get(currentAccount, 'posting.key_auths', []).map((x: any) => x[0])[0],
   };
 
   useEffect(() => {
@@ -80,7 +81,7 @@ const BackupKeysScreen = () => {
     importKeyModalRef?.current?.showModal();
   };
 
-  const _renderRevealBtn = (revealKey, keyType) => {
+  const _renderRevealBtn = (revealKey: any, keyType: any) => {
     const privateKey = get(currentAccount?.local, keyType, '');
     return (
       <TouchableOpacity

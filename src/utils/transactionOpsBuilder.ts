@@ -1,13 +1,11 @@
 import { getEngineActionOpArray } from '../providers/hive-engine/hiveEngineActions';
 import { EngineActions } from '../providers/hive-engine/hiveEngine.types';
-import { buildActiveCustomJsonOpArr } from '../providers/hive/dhive';
-import { getSpkActionJSON, getSpkTransactionId } from '../providers/hive-spk/hiveSpk';
-import { countDecimals } from './number';
+import { buildActiveCustomJsonOpArr } from '../providers/hive/hive';
+import { getAssetPrecision, toFixedNoExp, formatTokenQuantity } from './number';
 import TransferTypes from '../constants/transferTypes';
-import { OrderIdPrefix, SwapOptions } from '../providers/hive-trade/hiveTrade.types';
-import { convertSwapOptionsToLimitOrder } from '../providers/hive-trade/converters';
-import { getLimitOrderCreateOpData } from '../providers/hive-trade/hiveTrade';
-import parseToken from './parseToken';
+import TokenLayers from '../constants/tokenLayers';
+
+const MAX_RECIPIENTS = 50;
 
 interface TansferData {
   from: string;
@@ -15,72 +13,138 @@ interface TansferData {
   amount: string;
   fundType: string;
   memo?: string;
+  tokenLayer?: string;
   recurrence?: number;
   executions?: number;
+  // Hive-Engine token precision. Required for ENGINE transfers so the quantity is
+  // truncated to the token's real precision instead of the 8-decimal fallback —
+  // an over-precise quantity is silently rejected by the Engine sidechain.
+  precision?: number;
 }
-
-export const buildTradeOpsArray = (username: string, data: SwapOptions) => {
-  const { amountToSell, minToRecieve, transactionType } = convertSwapOptionsToLimitOrder(data);
-  const opData = getLimitOrderCreateOpData(
-    username,
-    amountToSell,
-    minToRecieve,
-    transactionType,
-    OrderIdPrefix.SWAP,
-  );
-
-  return [['limit_order_create', opData]];
-};
 
 export const buildTransferOpsArray = (
   transferType: string,
-  { from, to, amount, memo, fundType, recurrence, executions }: TansferData,
+  { from, to, amount, memo, fundType, recurrence, executions, tokenLayer, precision }: TansferData,
 ) => {
-  if (countDecimals(Number(amount)) < 3) {
-    amount = Number(amount).toFixed(3);
-  }
+  // Normalize to the asset's on-chain precision before building the op: HIVE/HBD/
+  // POINTS need exactly 3 decimals, VESTS 6; Hive-Engine tokens use their own
+  // precision (no scientific notation). Over-precise amounts are otherwise rejected.
+  const amountValue =
+    tokenLayer === TokenLayers.ENGINE
+      ? formatTokenQuantity(amount, precision)
+      : toFixedNoExp(amount, getAssetPrecision(fundType));
 
-  amount = `${amount} ${fundType}`;
+  amount = `${amountValue} ${fundType}`;
+
+  // check layer and build appropriate operation
+  if (tokenLayer === TokenLayers.ENGINE) {
+    if (transferType === TransferTypes.TRANSFER) {
+      const destinations = to
+        .trim()
+        .split(/[\s,]+/)
+        .filter(Boolean);
+      if (destinations.length === 0) {
+        throw new Error(`No valid recipients in: ${to}`);
+      }
+      if (destinations.length > MAX_RECIPIENTS) {
+        throw new Error(`Too many recipients (${destinations.length}), max is ${MAX_RECIPIENTS}`);
+      }
+      return destinations.flatMap((dest) =>
+        getEngineActionOpArray(
+          EngineActions.TRANSFER,
+          from,
+          dest,
+          amount,
+          fundType,
+          memo,
+          precision,
+        ),
+      );
+    }
+    return getEngineActionOpArray(
+      transferType as EngineActions,
+      from,
+      to,
+      amount,
+      fundType,
+      memo,
+      precision,
+    );
+  } else if (
+    tokenLayer === TokenLayers.POINTS &&
+    transferType === TransferTypes.ECENCY_POINT_TRANSFER
+  ) {
+    const destinations = to
+      .trim()
+      .split(/[\s,]+/)
+      .filter(Boolean);
+    if (destinations.length === 0) {
+      throw new Error(`No valid recipients in: ${to}`);
+    }
+    if (destinations.length > MAX_RECIPIENTS) {
+      throw new Error(`Too many recipients (${destinations.length}), max is ${MAX_RECIPIENTS}`);
+    }
+    return destinations.flatMap((receiver) =>
+      buildActiveCustomJsonOpArr(from, transferType, {
+        sender: from,
+        receiver,
+        amount,
+        memo,
+      }),
+    );
+  }
 
   switch (transferType) {
     case TransferTypes.CONVERT:
       return [
-        'convert',
-        {
-          owner: from,
-          amount,
-          requestid: new Date().getTime() >>> 0,
-        },
-      ];
-
-    case TransferTypes.DELEGATE_VESTING_SHARES:
-      return [
-        'delegate_vesting_shares',
-        {
-          delegator: from,
-          delegatee: to,
-          vesting_shares: amount,
-        },
-      ];
-
-    case TransferTypes.PURCHASE_ESTM:
-    case TransferTypes.TRANSFER_TOKEN:
-      return [
         [
-          'transfer',
+          transferType,
           {
-            from,
-            to,
+            owner: from,
             amount,
-            memo,
+            requestid: new Date().getTime() >>> 0,
           },
         ],
       ];
 
+    case TransferTypes.DELEGATE_VESTING_SHARES:
+      return [
+        [
+          transferType,
+          {
+            delegator: from,
+            delegatee: to,
+            vesting_shares: amount,
+          },
+        ],
+      ];
+
+    case TransferTypes.TRANSFER: {
+      const destinations = to
+        .trim()
+        .split(/[\s,]+/)
+        .filter(Boolean);
+      if (destinations.length === 0) {
+        throw new Error(`No valid recipients in: ${to}`);
+      }
+      if (destinations.length > MAX_RECIPIENTS) {
+        throw new Error(`Too many recipients (${destinations.length}), max is ${MAX_RECIPIENTS}`);
+      }
+      return destinations.map((dest) => [
+        transferType,
+        {
+          from,
+          to: dest,
+          amount,
+          memo,
+        },
+      ]);
+    }
+
     case TransferTypes.RECURRENT_TRANSFER:
       return [
         [
-          'recurrent_transfer',
+          transferType,
           {
             from,
             to,
@@ -96,7 +160,7 @@ export const buildTransferOpsArray = (
     case TransferTypes.TRANSFER_TO_SAVINGS:
       return [
         [
-          'transfer_to_savings',
+          transferType,
           {
             from,
             to,
@@ -108,7 +172,7 @@ export const buildTransferOpsArray = (
     case TransferTypes.TRANSFER_TO_VESTING:
       return [
         [
-          'transfer_to_vesting',
+          transferType,
           {
             from,
             to,
@@ -116,11 +180,10 @@ export const buildTransferOpsArray = (
           },
         ],
       ];
-    case TransferTypes.WITHDRAW_HIVE:
-    case TransferTypes.WITHDRAW_HBD:
+    case TransferTypes.TRANSFER_FROM_SAVINGS:
       return [
         [
-          'transfer_from_savings',
+          transferType,
           {
             from,
             to,
@@ -131,58 +194,16 @@ export const buildTransferOpsArray = (
         ],
       ];
 
-    case TransferTypes.POWER_DOWN:
+    case TransferTypes.WITHDRAW_VESTING:
       return [
         [
-          'withdraw_vesting',
+          transferType,
           {
             account: from,
             vesting_shares: amount,
           },
         ],
       ];
-    case TransferTypes.DELEGATE:
-      return [
-        [
-          'delegate_vesting_shares',
-          {
-            delegator: from,
-            delegatee: to,
-            vesting_shares: amount,
-          },
-        ],
-      ];
-
-    case TransferTypes.TRANSFER_ENGINE:
-      return getEngineActionOpArray(EngineActions.TRANSFER, from, to, amount, fundType, memo);
-    case TransferTypes.STAKE_ENGINE:
-      return getEngineActionOpArray(EngineActions.STAKE, from, to, amount, fundType, memo);
-    case TransferTypes.DELEGATE_ENGINE:
-      return getEngineActionOpArray(EngineActions.DELEGATE, from, to, amount, fundType, memo);
-    case TransferTypes.UNSTAKE_ENGINE:
-      return getEngineActionOpArray(EngineActions.UNDELEGATE, from, to, amount, fundType, memo);
-    case TransferTypes.UNDELEGATE_ENGINE:
-      return getEngineActionOpArray(EngineActions.UNDELEGATE, from, to, amount, fundType, memo);
-
-    case TransferTypes.POINTS:
-      return buildActiveCustomJsonOpArr(from, 'ecency_point_transfer', {
-        sender: from,
-        receiver: to,
-        amount,
-        memo,
-      });
-
-    case TransferTypes.TRANSFER_SPK:
-    case TransferTypes.TRANSFER_LARYNX:
-    case TransferTypes.POWER_UP_SPK:
-    case TransferTypes.POWER_DOWN_SPK:
-    case TransferTypes.LOCK_LIQUIDITY_SPK:
-    case TransferTypes.DELEGATE_SPK:
-      return buildActiveCustomJsonOpArr(
-        from,
-        getSpkTransactionId(transferType),
-        getSpkActionJSON(parseToken(amount), to, memo),
-      );
 
     default:
       throw new Error(`Unsupported transaction type: ${transferType}`);

@@ -1,13 +1,14 @@
-import React, { useState, useRef, useMemo, useEffect } from 'react';
-import { View, Text, TouchableOpacity } from 'react-native';
+import React, { useState, useMemo, useCallback, memo, useRef } from 'react';
+import { View, Text, TouchableOpacity, ScrollView, Platform } from 'react-native';
 import { useIntl } from 'react-intl';
-import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import DatePicker from 'react-native-date-picker';
 import { useDispatch } from 'react-redux';
 import EStyleSheet from 'react-native-extended-stylesheet';
+import Animated, { SlideOutRight } from 'react-native-reanimated';
 import styles from '../styles/pollsWizardContent.styles';
 import { TextButton } from '../../buttons';
 import { FormInput } from '../../formInput';
+import type { FormInputHandle } from '../../formInput';
 import { dateToFormatted } from '../../../utils/time';
 import { PollConfig } from './pollConfig';
 import { PollPreferredInterpretation } from '../../../providers/hive/hive.types';
@@ -18,6 +19,53 @@ import { useAppSelector } from '../../../hooks';
 import { MainButton } from '../../mainButton';
 import IconButton from '../../iconButton';
 
+interface ChoiceRowProps {
+  choice: string;
+  index: number;
+  placeholder: string;
+  assignInputRef: (index: number, input: FormInputHandle | null) => void;
+  onChange: (index: number, text: string) => void;
+  onRemove: (index: number) => void;
+}
+
+const ChoiceRow = memo(
+  ({ choice, index, placeholder, assignInputRef, onChange, onRemove }: ChoiceRowProps) => {
+    const handleChange = useCallback((text: string) => onChange(index, text), [onChange, index]);
+    const handleRemove = useCallback(() => onRemove(index), [onRemove, index]);
+    const handleInputRef = useCallback(
+      (input: FormInputHandle | null) => assignInputRef(index, input),
+      [assignInputRef, index],
+    );
+
+    return (
+      <View style={styles.inputContainer}>
+        <FormInput
+          ref={handleInputRef}
+          rightIconName="arrow-right"
+          iconType="MaterialCommunityIcons"
+          isValid={true}
+          onChange={handleChange}
+          placeholder={placeholder}
+          isEditable={true}
+          defaultValue={choice}
+          wrapperStyle={styles.inputWrapper}
+          inputStyle={styles.input}
+        />
+        {index > 1 && (
+          <IconButton
+            iconType="MaterialIcons"
+            color={EStyleSheet.value('$iconColor')}
+            size={24}
+            name="close"
+            style={styles.btnRemove}
+            onPress={handleRemove}
+          />
+        )}
+      </View>
+    );
+  },
+);
+
 const INIT_POLL_DRAFT: PollDraft = {
   title: '',
   choices: ['', ''],
@@ -27,9 +75,15 @@ const INIT_POLL_DRAFT: PollDraft = {
   interpretation: PollPreferredInterpretation.NUMBER_OF_VOTES,
   voteChange: false,
   hideVotes: false,
+  hideResults: true,
+  communityMembership: [],
+  token: undefined,
   maxChoicesVoted: 1,
   endTime: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), // set to 7 days from now
 };
+
+const isPollDraftValid = (draft: PollDraft) =>
+  !!draft.title && !draft.choices.some((item) => item === null || item === '');
 
 export const PollsWizardContent = ({
   draftId,
@@ -42,8 +96,6 @@ export const PollsWizardContent = ({
   const dispatch = useDispatch();
   // const navigation = useNavigation();
 
-  const pollConfigRef = useRef<typeof PollConfig>(null);
-
   const pollDraftsMeta = useAppSelector((state) => state.editor.pollDraftsMap);
   const _pollAtttaced = draftId && pollDraftsMeta[draftId];
 
@@ -53,70 +105,127 @@ export const PollsWizardContent = ({
   );
 
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showConfig, setShowConfig] = useState(false);
   const [pollDraft, setPollDraft] = useState<PollDraft>(_initPollDraft);
-  const [isValid, setIsValid] = useState(false);
+  const nextChoiceKeyRef = useRef(_initPollDraft.choices.length);
+  const pollDraftRef = useRef<PollDraft>(_initPollDraft);
+  const questionInputRef = useRef<any>(null);
+  const choiceInputRefs = useRef<Record<number, FormInputHandle | null>>({});
+  const [choiceKeys, setChoiceKeys] = useState(() =>
+    _initPollDraft.choices.map((_: any, index: any) => `poll-choice-${index}`),
+  );
+  const [isValid, setIsValid] = useState(() => isPollDraftValid(_initPollDraft));
 
   const expiryDateTime = new Date(pollDraft.endTime); // TOOD: adjust time formate to match with web
   const _mainBtnTitle = intl.formatMessage({
     id: _pollAtttaced ? 'post_poll.update_poll' : 'post_poll.attach_poll',
   });
 
-  useEffect(() => {
-    if (pollDraft && !!pollDraft.title) {
-      const hasNullOrEmpty = pollDraft.choices.some((item) => item === null || item === '');
-      setIsValid(!hasNullOrEmpty);
-      return;
-    }
-    setIsValid(false);
-  }, [pollDraft]);
+  const updateValidity = useCallback((nextDraft: PollDraft) => {
+    const nextIsValid = isPollDraftValid(nextDraft);
+    setIsValid((prev) => (prev === nextIsValid ? prev : nextIsValid));
+  }, []);
+
+  const updatePollDraftRef = useCallback(
+    (updater: (draft: PollDraft) => PollDraft) => {
+      const nextDraft = updater(pollDraftRef.current);
+      pollDraftRef.current = nextDraft;
+      updateValidity(nextDraft);
+      return nextDraft;
+    },
+    [updateValidity],
+  );
+
+  const updatePollDraftState = useCallback(
+    (updater: PollDraft | ((draft: PollDraft) => PollDraft)) => {
+      const nextDraft =
+        typeof updater === 'function'
+          ? (updater as (draft: PollDraft) => PollDraft)(pollDraftRef.current)
+          : updater;
+      pollDraftRef.current = nextDraft;
+      setPollDraft(nextDraft);
+      updateValidity(nextDraft);
+    },
+    [updateValidity],
+  );
+
+  const syncDraftState = useCallback(() => {
+    setPollDraft(pollDraftRef.current);
+  }, []);
 
   const addChoice = () => {
-    setPollDraft({
-      ...pollDraft,
-      choices: [...pollDraft.choices, ''],
+    const nextKey = `poll-choice-${nextChoiceKeyRef.current}`;
+    nextChoiceKeyRef.current += 1;
+    setChoiceKeys((prev: any) => [...prev, nextKey]);
+    updatePollDraftState({
+      ...pollDraftRef.current,
+      choices: [...pollDraftRef.current.choices, ''],
     });
   };
 
-  const _removeChoice = (index) => {
-    pollDraft.choices.splice(index, 1);
-    setPollDraft({
-      ...pollDraft,
-      choices: [...pollDraft.choices],
-    });
-  };
+  const _removeChoice = useCallback(
+    (index: number) => {
+      setChoiceKeys((prev: any) =>
+        prev.filter((_: any, choiceIndex: any) => choiceIndex !== index),
+      );
+      updatePollDraftState((prev) => {
+        const newChoices = [...prev.choices];
+        newChoices.splice(index, 1);
+        return { ...prev, choices: newChoices };
+      });
+    },
+    [updatePollDraftState],
+  );
 
-  const handleChoiceChange = (index, value) => {
-    const newChoices = [...pollDraft.choices];
-    newChoices[index] = value;
-    setPollDraft({
-      ...pollDraft,
-      choices: newChoices,
-    });
-  };
+  const handleChoiceChange = useCallback(
+    (index: number, value: string) => {
+      updatePollDraftRef((prev) => {
+        const newChoices = [...prev.choices];
+        newChoices[index] = value;
+        return { ...prev, choices: newChoices };
+      });
+    },
+    [updatePollDraftRef],
+  );
+
+  const assignChoiceInputRef = useCallback((index: number, input: FormInputHandle | null) => {
+    choiceInputRefs.current[index] = input;
+  }, []);
 
   const createPoll = () => {
     // Implement poll creation logic here
     console.log('Poll created!');
-    dispatch(setPollDraftAction(draftId || DEFAULT_USER_DRAFT_ID, pollDraft));
+    dispatch(setPollDraftAction(draftId || DEFAULT_USER_DRAFT_ID, pollDraftRef.current));
     // handle modal close
     onClose();
   };
 
   const resetPoll = () => {
+    pollDraftRef.current = INIT_POLL_DRAFT;
     setPollDraft(INIT_POLL_DRAFT);
+    nextChoiceKeyRef.current = INIT_POLL_DRAFT.choices.length;
+    setChoiceKeys(INIT_POLL_DRAFT.choices.map((_, index) => `poll-choice-${index}`));
+    updateValidity(INIT_POLL_DRAFT);
+    questionInputRef.current?.setText(INIT_POLL_DRAFT.title);
+    INIT_POLL_DRAFT.choices.forEach((choice, index) => {
+      choiceInputRefs.current[index]?.setText(choice);
+    });
     dispatch(removePollDraft(draftId || DEFAULT_USER_DRAFT_ID));
   };
 
-  const _onQuestionChange = (text) => {
-    setPollDraft({
-      ...pollDraft,
-      title: text,
-    });
-  };
+  const _onQuestionChange = useCallback(
+    (text: string) => {
+      updatePollDraftRef((prev) => ({
+        ...prev,
+        title: text,
+      }));
+    },
+    [updatePollDraftRef],
+  );
 
   const _onExpiryDateChange = (date: Date) => {
-    setPollDraft({
-      ...pollDraft,
+    updatePollDraftState({
+      ...pollDraftRef.current,
       endTime: date.toISOString(),
     });
   };
@@ -125,7 +234,7 @@ export const PollsWizardContent = ({
     const _dateString = dateToFormatted(expiryDateTime.toISOString(), 'ddd  |  MMM DD  |  hh:mm A');
     return (
       <>
-        <Text style={styles.label}>End Time</Text>
+        <Text style={styles.label}>{intl.formatMessage({ id: 'post_poll.wizard_end_time' })}</Text>
         <TouchableOpacity onPress={() => setShowDatePicker(true)}>
           <FormInput
             rightIconName="clock"
@@ -144,60 +253,61 @@ export const PollsWizardContent = ({
   const _renderConfig = () => {
     return (
       <>
-        <Text style={styles.label}>Configuration</Text>
-        <TouchableOpacity
-          onPress={() => {
-            pollConfigRef.current?.showConfig();
-          }}
-        >
-          <FormInput
-            rightIconName="settings"
-            iconType="MaterialIcons"
-            isEditable={false}
-            value="Age  |  Visibility  |  Interpretation"
-            wrapperStyle={styles.inputWrapper}
-            inputStyle={styles.input}
-            pointerEvents="none"
-          />
-        </TouchableOpacity>
+        {!showConfig && (
+          <Animated.View exiting={Platform.OS === 'ios' ? SlideOutRight : undefined}>
+            <View style={styles.separator} />
+            <TouchableOpacity
+              onPress={() => {
+                syncDraftState();
+                setShowConfig(!showConfig);
+              }}
+            >
+              <FormInput
+                rightIconName="settings"
+                iconType="MaterialIcons"
+                isEditable={false}
+                value={
+                  showConfig
+                    ? intl.formatMessage({ id: 'post_poll.wizard_collapse_config' })
+                    : intl.formatMessage({ id: 'post_poll.wizard_expand_config' })
+                }
+                wrapperStyle={styles.inputWrapper}
+                inputStyle={styles.input}
+                pointerEvents="none"
+              />
+            </TouchableOpacity>
+          </Animated.View>
+        )}
+        {showConfig && <PollConfig pollDraft={pollDraft} setPollDraft={updatePollDraftState} />}
       </>
     );
   };
 
-  const _renderChoiceInput = (choice, index) => (
-    <View style={styles.inputContainer}>
-      <FormInput
-        rightIconName="arrow-right"
-        iconType="MaterialCommunityIcons"
-        isValid={true}
-        onChange={(text) => handleChoiceChange(index, text)}
-        placeholder={intl.formatMessage(
-          { id: 'post_poll.choice_placeholder' },
-          { number: index + 1 },
-        )}
-        isEditable={true}
-        value={choice}
-        wrapperStyle={styles.inputWrapper}
-        inputStyle={styles.input}
-      />
-      {index > 1 && (
-        <IconButton
-          iconType="MaterialIcons"
-          color={EStyleSheet.value('$iconColor')}
-          size={24}
-          name="close"
-          style={styles.btnRemove}
-          onPress={() => _removeChoice(index)}
-        />
+  const _renderChoiceInput = (choice: string, index: number) => (
+    <ChoiceRow
+      key={choiceKeys[index]}
+      choice={choice}
+      index={index}
+      placeholder={intl.formatMessage(
+        { id: 'post_poll.choice_placeholder' },
+        { number: index + 1 },
       )}
-    </View>
+      assignInputRef={assignChoiceInputRef}
+      onChange={handleChoiceChange}
+      onRemove={_removeChoice}
+    />
   );
 
   return (
     <View style={{ flex: 1 }}>
-      <KeyboardAwareScrollView style={{ flex: 1 }} contentContainerStyle={styles.container}>
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={styles.container}
+        keyboardShouldPersistTaps="handled"
+      >
         <Text style={styles.label}>{intl.formatMessage({ id: 'post_poll.poll_question' })}</Text>
         <FormInput
+          ref={questionInputRef}
           rightIconName="progress-question"
           iconType="MaterialCommunityIcons"
           isValid={true}
@@ -206,12 +316,12 @@ export const PollsWizardContent = ({
             id: 'post_poll.question_placeholder',
           })}
           isEditable
-          value={pollDraft.title}
+          defaultValue={pollDraft.title}
           wrapperStyle={styles.inputWrapper}
           inputStyle={styles.input}
         />
 
-        <Text style={styles.label}>Choices</Text>
+        <Text style={styles.label}>{intl.formatMessage({ id: 'post_poll.wizard_choices' })}</Text>
         {pollDraft.choices.map(_renderChoiceInput)}
 
         <TextButton
@@ -232,14 +342,16 @@ export const PollsWizardContent = ({
             isDisable={!isValid}
             onPress={createPoll}
           />
-          <TextButton textStyle={styles.btnReset} text="Reset Poll" onPress={resetPoll} />
+          <TextButton
+            textStyle={styles.btnReset}
+            text={intl.formatMessage({ id: 'post_poll.wizard_reset' })}
+            onPress={resetPoll}
+          />
         </View>
-      </KeyboardAwareScrollView>
-
-      <PollConfig ref={pollConfigRef} pollDraft={pollDraft} setPollDraft={setPollDraft} />
+      </ScrollView>
 
       <DatePicker
-        type="datetime"
+        {...({ type: 'datetime' } as any)}
         modal={true}
         minimumDate={new Date()}
         date={new Date(pollDraft.endTime)}

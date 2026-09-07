@@ -2,24 +2,13 @@ import {
   UPDATE_ACTIVE_BOTTOM_TAB,
   TOAST_NOTIFICATION,
   RC_OFFER,
-  TOGGLE_ACCOUNTS_BOTTOM_SHEET,
-  SHOW_ACTION_MODAL,
-  HIDE_ACTION_MODAL,
   SET_AVATAR_CACHE_STAMP,
-  SHOW_PROFILE_MODAL,
-  HIDE_PROFILE_MODAL,
-  TOGGLE_QR_MODAL,
   SET_DEVICE_ORIENTATION,
   SET_LOCKED_ORIENTATION,
-  SHOW_REPLY_MODAL,
-  HIDE_REPLY_MODAL,
   LOGOUT,
   LOGOUT_DONE,
-  SHOW_WEBVIEW_MODAL,
-  HIDE_WEBVIEW_MODAL,
   HIVE_URI_TO_HANDLE,
-  SHOW_TRANSLATION_MODAL,
-  HIDE_TRANSLATION_MODAL,
+  UPDATE_UNREAD_CHAT_COUNT,
 } from '../constants/constants';
 import { orientations } from '../constants/orientationsConstants';
 
@@ -32,47 +21,27 @@ interface UiState {
   activeBottomTab: string;
   toastNotification: string;
   rcOffer: boolean;
-  isVisibleAccountsBottomSheet: boolean;
-  actionModalVisible: boolean;
-  actionModalData: any;
   avatarCacheStamp: number;
-  profileModalUsername: string;
-  isVisibleQRModal: boolean;
-  webViewModalData: any;
-  isVisibleWebViewModal: boolean;
   deviceOrientation: string;
   lockedOrientation: string;
-  replyModalVisible: boolean;
-  replyModalData?: PostEditorModalData | null;
   isLogingOut: boolean;
   deepLinkToHandle: string;
-  translationModalVisible: boolean;
-  translationModalData: any;
+  unreadChatCount: number;
 }
 
 const initialState: UiState = {
   activeBottomTab: 'HomeTabbar',
   toastNotification: '',
   rcOffer: false,
-  isVisibleAccountsBottomSheet: false,
-  actionModalVisible: false,
-  actionModalData: null,
   avatarCacheStamp: 0,
-  profileModalUsername: '',
-  isVisibleQRModal: false,
-  isVisibleWebViewModal: false,
-  webViewModalData: null,
   deviceOrientation: orientations.PORTRAIT,
   lockedOrientation: orientations.PORTRAIT,
-  replyModalData: null,
-  replyModalVisible: false,
   isLogingOut: false,
   deepLinkToHandle: '',
-  translationModalVisible: false,
-  translationModalData: null,
+  unreadChatCount: 0,
 };
 
-const uiReducer = (state = initialState, action): UiState => {
+const uiReducer = (state = initialState, action: any): UiState => {
   switch (action.type) {
     case UPDATE_ACTIVE_BOTTOM_TAB:
       return {
@@ -86,68 +55,16 @@ const uiReducer = (state = initialState, action): UiState => {
         toastNotification: action.payload,
       };
 
-    case SHOW_ACTION_MODAL: {
-      return {
-        ...state,
-        actionModalVisible: action.payload.actionModalVisible,
-        actionModalData: action.payload.actionModalData,
-      };
-    }
-
-    case HIDE_ACTION_MODAL: {
-      return {
-        ...state,
-        actionModalVisible: false,
-        actionModalData: null,
-      };
-    }
-
-    case SHOW_PROFILE_MODAL: {
-      return {
-        ...state,
-        profileModalUsername: action.payload.profileModalUsername,
-      };
-    }
-
-    case HIDE_PROFILE_MODAL: {
-      return {
-        ...state,
-        profileModalUsername: '',
-      };
-    }
-
     case RC_OFFER:
       return {
         ...state,
         rcOffer: action.payload,
       };
 
-    case TOGGLE_ACCOUNTS_BOTTOM_SHEET:
-      return {
-        ...state,
-        isVisibleAccountsBottomSheet: action.payload,
-      };
     case SET_AVATAR_CACHE_STAMP:
       return {
         ...state,
         avatarCacheStamp: action.payload,
-      };
-    case TOGGLE_QR_MODAL:
-      return {
-        ...state,
-        isVisibleQRModal: action.payload,
-      };
-    case SHOW_WEBVIEW_MODAL:
-      return {
-        ...state,
-        isVisibleWebViewModal: action.payload.isVisibleWebViewModal,
-        webViewModalData: action.payload.webViewModalData,
-      };
-    case HIDE_WEBVIEW_MODAL:
-      return {
-        ...state,
-        isVisibleWebViewModal: false,
-        webViewModalData: null,
       };
     case SET_DEVICE_ORIENTATION:
       return {
@@ -159,22 +76,7 @@ const uiReducer = (state = initialState, action): UiState => {
         ...state,
         lockedOrientation: action.payload,
       };
-    case SHOW_REPLY_MODAL:
-      const _payload = action.payload as PostEditorModalData;
-      if (_payload.mode === 'comment' && !_payload.parentPost) {
-        throw new Error('parent post missing for showing post editor modal with comment mode');
-      }
-      return {
-        ...state,
-        replyModalVisible: true,
-        replyModalData: action.payload,
-      };
-    case HIDE_REPLY_MODAL:
-      return {
-        ...state,
-        replyModalVisible: false,
-        replyModalData: null,
-      };
+
     case LOGOUT:
       return {
         ...state,
@@ -190,18 +92,13 @@ const uiReducer = (state = initialState, action): UiState => {
         ...state,
         deepLinkToHandle: action.payload,
       };
-    case SHOW_TRANSLATION_MODAL:
+
+    case UPDATE_UNREAD_CHAT_COUNT:
       return {
         ...state,
-        translationModalVisible: true,
-        translationModalData: action.payload,
+        unreadChatCount: action.payload,
       };
-    case HIDE_TRANSLATION_MODAL:
-      return {
-        ...state,
-        translationModalVisible: false,
-        translationModalData: null,
-      };
+
     default:
       return state;
   }

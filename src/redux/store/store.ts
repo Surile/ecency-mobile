@@ -7,11 +7,25 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import reducers from '../reducers';
 import MigrationHelpers from '../../utils/migrationHelpers';
 
+// Cap the unbounded optimistic-vote and point-activity caches before they are serialized
+// to AsyncStorage. The full collections stay in memory for the session; only the persisted
+// (most-recent) slice is bounded, which reduces the AsyncStorage (SQLite) write volume and
+// JSON serialization cost on the JS thread. Insertion order keeps the newest entries.
+// NOTE: this is write-volume hygiene, NOT the Background-ANR fix — that ANR is react-native-
+// firebase's own SharedPreferences message store on the main thread (fixed via patch-package).
+const CACHE_PERSIST_LIMIT = 200;
+const capObject = (obj: Record<string, any> = {}, limit = CACHE_PERSIST_LIMIT) => {
+  const safe = obj || {};
+  const entries = Object.entries(safe);
+  return entries.length <= limit ? safe : Object.fromEntries(entries.slice(-limit));
+};
+
 const transformCacheVoteMap = createTransform(
   (inboundState: any) => ({
     ...inboundState,
+    votesCollection: capObject(inboundState.votesCollection),
     subscribedCommunities: Array.from(inboundState.subscribedCommunities),
-    pointActivities: Array.from(inboundState.pointActivities),
+    pointActivities: Array.from(inboundState.pointActivities).slice(-CACHE_PERSIST_LIMIT),
   }),
   (outboundState) => ({
     ...outboundState,
@@ -36,11 +50,12 @@ const persistConfig = {
   key: 'root',
   // Storage Method (React Native)
   storage: AsyncStorage,
-  version: 11, // New version 0, default or previous version -1, versions are useful migrations
+  version: 22, // v22: Default the followed-hashtag (tags) notification ON
   // // Blacklist (Don't Save Specific Reducers)
   blacklist: ['communities', 'user', 'ui'],
   transforms: [transformCacheVoteMap, transformWalkthroughMap],
   migrate: createMigrate(MigrationHelpers.reduxMigrations, { debug: false }),
+  throttle: 1000, // Limit AsyncStorage writes to once per second
 };
 
 // // Middleware: Redux Persist Persisted Reducer

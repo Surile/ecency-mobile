@@ -3,21 +3,27 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useIntl } from 'react-intl';
 import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { PortfolioItem } from 'providers/ecency/ecency.types';
+import { SheetManager } from 'react-native-actions-sheet';
 import { BasicHeader } from '../../../components';
-import { CoinSummary, ActivitiesList } from '../children';
+import { CoinSummary, ActivitiesList, RecurrentTransfersModal } from '../children';
 import styles from './screen.styles';
-import { CoinActivity, CoinData, QuoteItem } from '../../../redux/reducers/walletReducer';
+import { CoinActivity } from '../../../redux/reducers/walletReducer';
 import { useAppSelector } from '../../../hooks';
-import RootNavigation from '../../../navigation/rootNavigation';
+import RootNavigation, { NavigateOptions } from '../../../navigation/rootNavigation';
+import { PinCodeParams, RouteName } from '../../../navigation/types';
 import ROUTES from '../../../constants/routeNames';
-import { ASSET_IDS } from '../../../constants/defaultAssets';
+import { selectCurrentAccount, selectIsPinCodeOpen } from '../../../redux/selectors';
 import { DelegationsModal, MODES } from '../children/delegationsModal';
 import TransferTypes from '../../../constants/transferTypes';
 import { walletQueries } from '../../../providers/queries';
 import parseAsset from '../../../utils/parseAsset';
+import TokenLayers from '../../../constants/tokenLayers';
+import { SheetNames } from '../../../navigation/sheets';
+import { getHistoryOpsForSymbol } from '../../../utils/walletHistory';
 
 export interface AssetDetailsScreenParams {
-  coinId: string;
+  asset: PortfolioItem;
 }
 
 interface AssetDetailsScreenProps {
@@ -28,36 +34,75 @@ interface AssetDetailsScreenProps {
 const AssetDetailsScreen = ({ navigation, route }: AssetDetailsScreenProps) => {
   const intl = useIntl();
 
-  const coinId = route.params?.coinId;
-  if (!coinId) {
-    throw new Error('Coin symbol must be passed');
+  if (!route.params?.asset) {
+    Alert.alert('Invalid coin data');
+    navigation.goBack();
   }
 
   // refs
   const appState = useRef(AppState.currentState);
-  const delegationsModalRef = useRef(null);
+  const delegationsModalRef = useRef<any>(null);
+  const recurrentTransfersModalRef = useRef<any>(null);
+
+  // state
+  const [showChart, setShowChart] = useState(false);
+  const [asset, setAsset] = useState<PortfolioItem>(route.params?.asset);
+  // Undefined means the tab's full operation set. Kept on the screen rather than persisted:
+  // it is a way to look through one token's history, not a setting.
+  const [historyOps, setHistoryOps] = useState<string[] | undefined>();
+  const assetSymbol = asset.symbol;
+  const assetLayer = asset.layer;
+
+  // Only the Hive layer resolves a server-side operation bitmask. Engine and points
+  // histories come from their own APIs, which take no such filter.
+  const canFilterActivities = assetLayer === TokenLayers.HIVE;
 
   // queries
   const assetsQuery = walletQueries.useAssetsQuery();
-  const activitiesQuery = walletQueries.useActivitiesQuery(coinId);
-  const pendingRequestsQuery = walletQueries.usePendingRequestsQuery(coinId);
+  const activitiesQuery = walletQueries.useActivitiesQuery(assetSymbol, asset.layer, historyOps);
+  const pendingRequestsQuery = walletQueries.usePendingRequestsQuery(assetSymbol);
+  const recurringActivitiesQuery = walletQueries.useRecurringActivitesQuery(assetSymbol);
 
-  // redux props
-  const selectedCoins = useAppSelector((state) => state.wallet.selectedCoins);
-  const coinData: CoinData = useAppSelector((state) => state.wallet.coinsData[coinId]);
-  const quote: QuoteItem = useAppSelector((state) =>
-    state.wallet.quotes ? state.wallet.quotes[coinId] : {},
-  );
-  const username = useAppSelector((state) => state.wallet.username);
-  const isPinCodeOpen = useAppSelector((state) => state.application.isPinCodeOpen);
+  // TODO: verify if quote can be fetched like this or quote fetching can be ignored
+  // const quote: QuoteItem = useAppSelector((state) =>
+  //   state.wallet.quotes ? state.wallet.quotes[assetSymbol] : {},
+  // );
+  // state.wallet.username is only populated by the legacy SET_COINS_DATA path
+  // and is often empty; fall back to the canonical currentAccount name so the
+  // SDK balance/history queries (which short-circuit on empty username) fire.
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const username =
+    useAppSelector((state) => state.wallet.username) ||
+    currentAccount?.name ||
+    currentAccount?.username ||
+    '';
+  const isPinCodeOpen = useAppSelector(selectIsPinCodeOpen);
 
-  // state
-  const [symbol] = useState(selectedCoins.find((item) => item.id === coinId).symbol);
-  const [showChart, setShowChart] = useState(false);
+  useEffect(() => {
+    if (assetsQuery.data != null) {
+      const updatedAsset = assetsQuery.data.find((a) => a.symbol === assetSymbol);
+      if (updatedAsset) {
+        setAsset(updatedAsset);
+      }
+    }
+  }, [assetsQuery.data]);
+
+  // The AppState listener is registered once, so it would capture the first render's
+  // `_fetchDetails` and with it a permanently-false `isRefreshing`/`isLoading`. Route
+  // it through a ref so foregrounding refreshes against current query state instead of
+  // restarting an in-flight fetch.
+  const fetchDetailsRef = useRef<(refresh?: boolean) => void>(() => {});
 
   // side-effects
   useEffect(() => {
-    _fetchDetails();
+    fetchDetailsRef.current = _fetchDetails;
+  });
+
+  // No fetch on mount: every query here loads itself, respecting `staleTime`. The call
+  // that used to be here fell through to `fetchNextPage`, so re-entering the screen inside
+  // the 60s window (nothing in flight, so the loading guard did not hold) appended an older
+  // page the user had not scrolled to, one extra get_account_history per screen open.
+  useEffect(() => {
     const appStateSub = AppState.addEventListener('change', _handleAppStateChange);
     return _cleanup(appStateSub);
   }, []);
@@ -72,8 +117,7 @@ const AssetDetailsScreen = ({ navigation, route }: AssetDetailsScreenProps) => {
 
   const _handleAppStateChange = (nextAppState: AppStateStatus) => {
     if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
-      console.log('updating coins activities on app resume', coinId);
-      _fetchDetails(true);
+      fetchDetailsRef.current(true);
     }
 
     appState.current = nextAppState;
@@ -84,19 +128,19 @@ const AssetDetailsScreen = ({ navigation, route }: AssetDetailsScreenProps) => {
       assetsQuery.refetch();
       activitiesQuery.refresh();
       pendingRequestsQuery.refetch();
+      if (recurringActivitiesQuery) {
+        recurringActivitiesQuery.refetch();
+      }
       return;
     } else if (activitiesQuery.isLoading) {
-      console.log('Skipping transaction fetch');
       return;
     }
 
+    // This check is only an early-out on the very first load. The concurrency guard that
+    // matters lives in `_fetchNextPage`, which gates on the query's overall `isFetching`,
+    // because `fetchNextPage` would otherwise cancel an in-flight refresh.
     activitiesQuery.fetchNextPage();
   };
-
-  if (!coinData) {
-    Alert.alert('Invalid coin data');
-    navigation.goBack();
-  }
 
   const _onInfoPress = (dataKey: string) => {
     if (
@@ -105,51 +149,75 @@ const AssetDetailsScreen = ({ navigation, route }: AssetDetailsScreenProps) => {
     ) {
       delegationsModalRef.current.showModal(dataKey);
     }
+
+    if (dataKey === 'total_recurrent_transfers') {
+      recurrentTransfersModalRef.current?.showModal();
+    }
   };
 
   const _onActionPress = (transferType: string, baseActivity: CoinActivity | null = null) => {
-    let navigateTo = ROUTES.SCREENS.TRANSFER;
-    let navigateParams = {};
+    let navigateTo: RouteName = ROUTES.SCREENS.TRANSFER;
+    let navigateParams: any = {};
+    let baseBalance = asset.liquid ?? 0;
+    let fundType = assetSymbol;
 
-    if (coinId === ASSET_IDS.ECENCY && !transferType.includes('transfer')) {
-      navigateTo = ROUTES.SCREENS.REDEEM;
-      navigateParams = {
-        balance: coinData.balance,
-        redeemType: transferType === 'dropdown_promote' ? 'promote' : 'boost_plus',
-      };
-    } else {
-      let { balance } = coinData;
-
+    if (assetLayer === TokenLayers.POINTS) {
       switch (transferType) {
-        case TransferTypes.UNSTAKE_ENGINE:
-        case TransferTypes.DELEGATE_ENGINE:
-          balance =
-            coinData.extraDataPairs?.reduce(
-              (bal, data) => (data.dataKey === 'staked' ? Number(data.value) : bal),
-              0,
-            ) ?? 0;
+        case TransferTypes.ECENCY_POINT_TRANSFER:
+          fundType = 'POINT';
           break;
-        case TransferTypes.UNDELEGATE_ENGINE:
-          balance =
-            coinData.extraDataPairs?.reduce(
+        case TransferTypes.PROMOTE:
+        case TransferTypes.BOOST:
+          navigateTo = ROUTES.SCREENS.REDEEM;
+          navigateParams = {
+            redeemType: transferType === TransferTypes.PROMOTE ? 'promote' : 'boost_plus',
+          };
+          RootNavigation.navigate({
+            name: navigateTo,
+            params: navigateParams,
+          });
+          return;
+      }
+    }
+
+    if (assetLayer === TokenLayers.HIVE) {
+      switch (transferType) {
+        case TransferTypes.SWAP_TOKEN:
+          navigateTo = ROUTES.SCREENS.TRADE;
+          break;
+        case TransferTypes.TRANSFER_FROM_SAVINGS:
+          baseBalance = asset.savings ?? 0;
+          break;
+      }
+    }
+
+    if (assetLayer === TokenLayers.ENGINE) {
+      switch (transferType) {
+        case TransferTypes.UNSTAKE:
+        case TransferTypes.DELEGATE:
+          baseBalance = asset.staked ?? 0;
+          break;
+        case TransferTypes.UNDELEGATE:
+          baseBalance =
+            asset.extraData?.reduce(
               (bal, data) => (data.dataKey === 'delegations_out' ? Number(data.value) : bal),
               0,
             ) ?? 0;
           break;
-        case TransferTypes.WITHDRAW_HIVE:
-        case TransferTypes.WITHDRAW_HBD:
-          balance = coinData.savings ?? 0;
-          break;
-
-        case TransferTypes.SWAP_TOKEN:
-          navigateTo = ROUTES.SCREENS.TRADE;
-          break;
       }
+    }
 
+    navigateParams = {
+      transferType,
+      fundType,
+      assetLayer,
+      balance: baseBalance,
+    };
+
+    if (assetLayer === TokenLayers.CHAIN && transferType === TransferTypes.RECEIVE) {
       navigateParams = {
-        transferType: coinId === ASSET_IDS.ECENCY ? 'points' : transferType,
-        fundType: coinId === ASSET_IDS.ECENCY ? 'ESTM' : symbol,
-        balance,
+        ...navigateParams,
+        tokenAddress: asset.address,
       };
     }
 
@@ -158,24 +226,28 @@ const AssetDetailsScreen = ({ navigation, route }: AssetDetailsScreenProps) => {
         ...navigateParams,
         referredUsername:
           baseActivity.receiver !== username ? baseActivity.receiver : baseActivity.sender,
-        initialAmount: `${Math.abs(parseAsset(baseActivity.value.trim()).amount)}`,
+        initialAmount: baseActivity.value
+          ? `${Math.abs(parseAsset(baseActivity.value.trim()).amount)}`
+          : '0',
         initialMemo: baseActivity.memo,
       };
     }
 
     if (isPinCodeOpen) {
+      // navigateTo and navigateParams are built together in the switches above but are separate
+      // locals here, so the pairing cannot be checked at this point.
       RootNavigation.navigate({
         name: ROUTES.SCREENS.PINCODE,
         params: {
           navigateTo,
           navigateParams,
-        },
+        } as PinCodeParams,
       });
     } else {
       RootNavigation.navigate({
         name: navigateTo,
         params: navigateParams,
-      });
+      } as NavigateOptions);
     }
   };
 
@@ -183,34 +255,75 @@ const AssetDetailsScreen = ({ navigation, route }: AssetDetailsScreenProps) => {
     _fetchDetails(true);
   };
 
+  const _onFilterPress = async () => {
+    const result = await SheetManager.show(SheetNames.WALLET_HISTORY_FILTERS, {
+      payload: { symbol: assetSymbol, selected: historyOps ?? [] },
+    });
+
+    // A backdrop, swipe or back dismissal resolves the payload object rather than what the
+    // sheet returns, so gate on `operations` being an array instead of on truthiness.
+    if (!Array.isArray(result?.operations)) {
+      return;
+    }
+
+    // A full selection is the same request as no selection, so keep it as "unset" and the
+    // query key stays on the default rather than forking a cache entry per equivalent pick.
+    const isEverything = result.operations.length === getHistoryOpsForSymbol(assetSymbol).length;
+    setHistoryOps(isEverything ? undefined : result.operations);
+  };
+
+  const _coinTypeMap: Record<string, string> = {
+    HIVE: 'HIVE',
+    HBD: 'HBD',
+    HP: 'VESTS',
+  };
+
+  const _onAnalyticsPress = () => {
+    const coinType = _coinTypeMap[assetSymbol] || assetSymbol;
+    SheetManager.show(SheetNames.BALANCE_ANALYTICS, {
+      payload: { coinType, username },
+    });
+  };
+
   const _renderHeaderComponent = (
     <CoinSummary
-      id={coinId}
-      coinSymbol={symbol}
-      coinData={coinData}
-      percentChagne={(quote ? quote.percentChange : coinData?.percentChange) || 0}
+      tokenSymbol={assetSymbol}
+      asset={asset}
+      totalRecurrentAmount={recurringActivitiesQuery?.totalAmount || 0}
       onActionPress={_onActionPress}
       onInfoPress={_onInfoPress}
       showChart={showChart}
       setShowChart={setShowChart}
+      onAnalyticsPress={_coinTypeMap[assetSymbol] ? _onAnalyticsPress : undefined}
     />
   );
 
   return (
-    <SafeAreaView style={styles.container}>
-      <BasicHeader title={intl.formatMessage({ id: 'wallet.coin_details' })} />
+    <SafeAreaView edges={['top']} style={styles.container}>
+      <BasicHeader
+        title={intl.formatMessage({ id: 'wallet.coin_details' })}
+        // `tune` is the shared glyph for filter controls across the app: search filters
+        // and the wallet's manage-tokens button use the same one.
+        rightIconName={canFilterActivities ? 'tune' : undefined}
+        rightIconAccessibilityLabel={intl.formatMessage({ id: 'wallet.filter_activities' })}
+        iconType="MaterialIcons"
+        handleRightIconPress={_onFilterPress}
+      />
       <ActivitiesList
         header={_renderHeaderComponent}
         completedActivities={activitiesQuery.data || []}
         pendingActivities={pendingRequestsQuery.data || []}
         refreshing={activitiesQuery.isRefreshing}
         loading={activitiesQuery.isLoading}
-        activitiesEnabled={!coinData?.isSpk}
+        loadingMore={activitiesQuery.isFetchingNextPage}
+        failed={activitiesQuery.isError}
+        activitiesEnabled={asset.layer !== 'chain'}
         onEndReached={_fetchDetails}
         onRefresh={_onRefresh}
         onActionPress={_onActionPress}
       />
       <DelegationsModal ref={delegationsModalRef} />
+      <RecurrentTransfersModal assetId={assetSymbol} ref={recurrentTransfersModalRef} />
     </SafeAreaView>
   );
 };

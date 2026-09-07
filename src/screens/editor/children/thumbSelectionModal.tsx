@@ -14,11 +14,14 @@ export interface ThumbSelectionModalProps {
   onThumbSelection: (index: number) => void;
 }
 
-const ThumbSelectionModal = ({ onThumbSelection, thumbUrl }: ThumbSelectionModalProps, ref) => {
+const ThumbSelectionModal = (
+  { onThumbSelection, thumbUrl }: ThumbSelectionModalProps,
+  ref: any,
+) => {
   const intl = useIntl();
 
   const [imageUrls, setImageUrls] = useState<string[]>([]);
-  const sheetModalRef = useRef<ActionSheet>();
+  const sheetModalRef = useRef<any>(null);
 
   // CALLBACK_METHODS
   useImperativeHandle(ref, () => ({
@@ -55,6 +58,7 @@ const ThumbSelectionModal = ({ onThumbSelection, thumbUrl }: ThumbSelectionModal
     return (
       <TouchableOpacity onPress={() => _onPress()}>
         <ExpoImage
+          pointerEvents="none"
           source={{ uri: item }}
           style={{ ...styles.thumbStyle, ...selectedStyle }}
           contentFit="cover"

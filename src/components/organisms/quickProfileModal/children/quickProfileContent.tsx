@@ -2,9 +2,25 @@ import React, { useEffect, useState } from 'react';
 import { useIntl } from 'react-intl';
 import { View, Alert } from 'react-native';
 import { StatsItem } from 'components/statsPanel';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Sentry from '@sentry/react-native';
+import {
+  getFollowCountQueryOptions,
+  getAccountFullQueryOptions,
+  getRelationshipBetweenAccountsQueryOptions,
+  getAccountRcQueryOptions,
+  checkFavoriteQueryOptions,
+} from '@ecency/sdk';
+import { useQueryClient } from '@tanstack/react-query';
+import { captureException } from '../../../../utils/sentryUtils';
 import { MainButton, StatsPanel } from '../../..';
-import { addFavorite, checkFavorite, deleteFavorite } from '../../../../providers/ecency/ecency';
-import { followUser, getFollows, getRelationship, getUser } from '../../../../providers/hive/dhive';
+import {
+  useAddFavouriteMutation,
+  useDeleteFavouriteMutation,
+} from '../../../../providers/queries/bookmarkQueries';
+import { getDigitPinCode } from '../../../../providers/hive/hive';
+import { useFollowMutation, useUnfollowMutation } from '../../../../providers/sdk/mutations';
+import { decryptKey } from '../../../../utils/crypto';
 import { getRcPower, getVotingPower } from '../../../../utils/manaBar';
 import styles from './quickProfileStyles';
 import { ProfileBasic } from './profileBasic';
@@ -13,9 +29,10 @@ import { default as ROUTES } from '../../../../constants/routeNames';
 import { ActionPanel } from './actionPanel';
 import { getTimeFromNowNative } from '../../../../utils/time';
 import { useAppDispatch, useAppSelector } from '../../../../hooks';
+import { selectCurrentAccount, selectPin, selectIsLoggedIn } from '../../../../redux/selectors';
 import { toastNotification } from '../../../../redux/actions/uiAction';
-import bugsnapInstance from '../../../../config/bugsnag';
 import RootNavigation from '../../../../navigation/rootNavigation';
+import { startMattermostDirectMessage } from '../../../../providers/chat/mattermost';
 
 interface QuickProfileContentProps {
   username: string;
@@ -24,18 +41,26 @@ interface QuickProfileContentProps {
 
 export const QuickProfileContent = ({ username, onClose }: QuickProfileContentProps) => {
   const intl = useIntl();
+  const insets = useSafeAreaInsets();
   const dispatch = useAppDispatch();
+  const queryClient = useQueryClient();
 
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const pinCode = useAppSelector((state) => state.application.pin);
-  const isLoggedIn = useAppSelector((state) => state.application.isLoggedIn);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const pinCode = useAppSelector(selectPin);
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
+
+  const addFavouriteMutation = useAddFavouriteMutation();
+  const deleteFavouriteMutation = useDeleteFavouriteMutation();
+  const followMutation = useFollowMutation();
+  const unfollowMutation = useUnfollowMutation();
 
   const [isLoading, setIsLoading] = useState(false);
-  const [user, setUser] = useState(null);
-  const [follows, setFollows] = useState(null);
+  const [user, setUser] = useState<any>(null);
+  const [follows, setFollows] = useState<any>(null);
   const [isFollowing, setIsFollowing] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isFavourite, setIsFavourite] = useState(false);
+  const [rcAccount, setRcAccount] = useState<any>(null);
 
   const isOwnProfile = currentAccount && currentAccount.name === username;
   const currentAccountName = currentAccount ? currentAccount.name : null;
@@ -43,41 +68,88 @@ export const QuickProfileContent = ({ username, onClose }: QuickProfileContentPr
 
   useEffect(() => {
     if (username) {
-      _fetchUser();
-      _fetchExtraUserData();
+      // Clear stale data first to prevent showing previous profile during fetch
+      setUser(null);
+      setRcAccount(null);
+      setFollows(null);
+      setIsFollowing(false);
+      setIsMuted(false);
+      setIsFavourite(false);
+
+      // Then fetch new data
+      setIsLoading(true);
+      (async () => {
+        try {
+          await Promise.all([_fetchUser(), _fetchExtraUserData()]);
+        } catch (error) {
+          // Errors are handled within individual functions
+          console.warn('Error fetching profile data:', error);
+        } finally {
+          setIsLoading(false);
+        }
+      })();
     } else {
       setUser(null);
+      setRcAccount(null);
     }
   }, [username]);
 
   // NETWORK CALLS
   const _fetchUser = async () => {
-    setIsLoading(true);
     try {
-      const _user = await getUser(username, isOwnProfile);
+      const _user = await queryClient.fetchQuery(getAccountFullQueryOptions(username));
       setUser(_user);
+      try {
+        const rcResult = await queryClient.fetchQuery(getAccountRcQueryOptions(username));
+        // SDK may return array or single object
+        setRcAccount(Array.isArray(rcResult) ? rcResult[0] ?? null : rcResult ?? null);
+      } catch (error) {
+        setRcAccount(null);
+      }
     } catch (error) {
-      setIsLoading(false);
+      setUser(null);
     }
   };
 
   const _fetchExtraUserData = async () => {
     try {
       if (username) {
-        let _isFollowing;
-        let _isMuted;
-        let _isFavourite;
+        let _isFollowing = false;
+        let _isMuted = false;
+        let _isFavourite = false;
         let follows;
 
         if (!isOwnProfile) {
-          const res = await getRelationship(currentAccountName, username);
-          _isFollowing = res && res.follows;
-          _isMuted = res && res.ignores;
-          _isFavourite = await checkFavorite(username);
+          if (currentAccountName) {
+            const res = await queryClient.fetchQuery(
+              getRelationshipBetweenAccountsQueryOptions(currentAccountName, username),
+            );
+            _isFollowing = res && res.follows;
+            _isMuted = res && res.ignores;
+
+            // Check if user is favorited using SDK query
+            const accessToken =
+              currentAccount?.local?.accessToken && pinCode
+                ? decryptKey(currentAccount.local.accessToken, getDigitPinCode(pinCode))
+                : undefined;
+
+            if (accessToken) {
+              _isFavourite = Boolean(
+                await queryClient.fetchQuery(
+                  checkFavoriteQueryOptions(currentAccountName, accessToken, username),
+                ),
+              );
+            }
+          } else {
+            _isFollowing = false;
+            _isMuted = false;
+            _isFavourite = false;
+          }
         }
 
         try {
-          follows = await getFollows(username);
+          // Fetch follow counts using SDK query
+          follows = await queryClient.fetchQuery(getFollowCountQueryOptions(username));
         } catch (err) {
           follows = null;
         }
@@ -86,80 +158,70 @@ export const QuickProfileContent = ({ username, onClose }: QuickProfileContentPr
         setIsFollowing(_isFollowing);
         setIsMuted(_isMuted);
         setIsFavourite(_isFavourite);
-        setIsLoading(false);
       }
     } catch (error) {
       console.warn('Failed to fetch complete profile data', error);
+      captureException(error, (scope) => scope.setTag('context', 'quick-profile-fetch'));
       Alert.alert(
         intl.formatMessage({
           id: 'alert.fail',
         }),
-        error.message || error.toString(),
+        (error as any).message || intl.formatMessage({ id: 'alert.unknow_error' }),
       );
-      setIsLoading(false);
     }
   };
 
   const _onFollowPress = async () => {
+    const shouldUnfollow = isFollowing;
     try {
-      const follower = currentAccountName;
-      const following = username;
-
       setIsLoading(true);
-      await followUser(currentAccount, pinCode, {
-        follower,
-        following,
-      });
+      if (shouldUnfollow) {
+        await unfollowMutation.mutateAsync({ following: username });
+      } else {
+        await followMutation.mutateAsync({ following: username });
+      }
 
-      setIsLoading(false);
-      setIsFollowing(true);
+      setIsFollowing((prev) => !prev);
       dispatch(
         toastNotification(
           intl.formatMessage({
-            id: isFollowing ? 'alert.success_unfollow' : 'alert.success_follow',
+            id: shouldUnfollow ? 'alert.success_unfollow' : 'alert.success_follow',
           }),
         ),
       );
     } catch (err) {
-      setIsLoading(false);
       console.warn('Failed to follow user', err);
-      bugsnapInstance.notify(err);
-      Alert.alert(intl.formatMessage({ id: 'alert.fail' }), err.message);
+      Sentry.captureException(err);
+      Alert.alert(intl.formatMessage({ id: 'alert.fail' }), (err as any).message);
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const _onFavouritePress = async () => {
-    try {
-      setIsLoading(true);
-      let favoriteAction;
+  const _onFavouritePress = () => {
+    setIsLoading(true);
 
-      if (isFavourite) {
-        favoriteAction = deleteFavorite;
-      } else {
-        favoriteAction = addFavorite;
-      }
+    const mutation = isFavourite ? deleteFavouriteMutation : addFavouriteMutation;
 
-      await favoriteAction(username);
-
-      dispatch(
-        toastNotification(
+    mutation.mutate(username, {
+      onSuccess: () => {
+        // Toast is already dispatched by the mutation hook
+        setIsFavourite(!isFavourite);
+        setIsLoading(false);
+      },
+      onError: (error: any) => {
+        // Error toast is already dispatched by the mutation hook
+        console.warn('Failed to perform favorite action', error);
+        captureException(error, (scope) => scope.setTag('context', 'quick-profile-favorite'));
+        setIsLoading(false);
+        Alert.alert(
           intl.formatMessage({
-            id: isFavourite ? 'alert.success_unfavorite' : 'alert.success_favorite',
+            id: 'alert.fail',
           }),
-        ),
-      );
-      setIsFavourite(!isFavourite);
-      setIsLoading(false);
-    } catch (error) {
-      console.warn('Failed to perform favorite action');
-      setIsLoading(false);
-      Alert.alert(
-        intl.formatMessage({
-          id: 'alert.fail',
-        }),
-        error.message || error.toString(),
-      );
-    }
+          error.message || intl.formatMessage({ id: 'alert.unknow_error' }),
+        );
+      },
+    });
   };
 
   // UI CALLBACKS
@@ -181,6 +243,42 @@ export const QuickProfileContent = ({ username, onClose }: QuickProfileContentPr
     }
   };
 
+  const _handleMessage = async () => {
+    try {
+      if (!currentAccount?.name) {
+        return;
+      }
+
+      const dmChannel = await startMattermostDirectMessage(username);
+
+      if (!dmChannel.channelId) {
+        throw new Error('User has not joined chats');
+      }
+
+      if (onClose) {
+        onClose();
+      }
+
+      RootNavigation.navigate({
+        name: ROUTES.SCREENS.CHAT_THREAD,
+        params: {
+          channelId: dmChannel.channelId,
+          channelName: username,
+          bootstrapResult: null,
+        },
+      });
+    } catch (error) {
+      if (onClose) {
+        onClose();
+      }
+      dispatch(
+        toastNotification(
+          intl.formatMessage({ id: 'chats.dm_error', defaultMessage: 'User has not joined chats' }),
+        ),
+      );
+    }
+  };
+
   // extract prop values
   let _votingPower = '';
   let _resourceCredits = '';
@@ -193,9 +291,9 @@ export const QuickProfileContent = ({ username, onClose }: QuickProfileContentPr
 
   if (isProfileLoaded) {
     _votingPower = getVotingPower(user).toFixed(1);
-    _resourceCredits = getRcPower(user).toFixed(0);
+    _resourceCredits = getRcPower(rcAccount || user).toFixed(0);
     _postCount = user.post_count || 0;
-    _about = user.about?.profile?.about || '';
+    _about = user.profile?.about || '';
     _reputation = parseReputation(user.reputation);
     _createdData = getTimeFromNowNative(user.created);
 
@@ -220,12 +318,17 @@ export const QuickProfileContent = ({ username, onClose }: QuickProfileContentPr
     { label: intl.formatMessage({ id: 'profile.reputation' }), value: _reputation },
   ] as StatsItem[];
 
+  const _modaStyle = {
+    ...styles.modalStyle,
+    marginBottom: !insets.bottom && 16,
+  };
+
   return (
-    <View style={styles.modalStyle}>
+    <View style={_modaStyle}>
       <ProfileBasic
         username={username}
         about={_about}
-        created={_createdData}
+        created={_createdData as any}
         votingPower={_votingPower}
         isLoading={isLoading}
         onPress={_openFullProfile}
@@ -245,6 +348,7 @@ export const QuickProfileContent = ({ username, onClose }: QuickProfileContentPr
           isLoading={isLoading}
           onFavouritePress={_onFavouritePress}
           onFollowPress={_onFollowPress}
+          onMessagePress={_handleMessage}
         />
       )}
     </View>

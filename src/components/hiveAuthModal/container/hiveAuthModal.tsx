@@ -1,13 +1,14 @@
-import React, { forwardRef, useImperativeHandle, useRef, useState } from 'react';
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { View } from 'react-native';
 
 import { useIntl } from 'react-intl';
-import { useNavigation } from '@react-navigation/native';
 import ActionSheet from 'react-native-actions-sheet';
-import { Operation } from '@hiveio/dhive';
+import type { Operation } from '@ecency/sdk';
 import styles from '../styles/hiveAuthModal.styles';
 import { useAppSelector } from '../../../hooks';
 import ROUTES from '../../../constants/routeNames';
+import { selectIsPinCodeOpen } from '../../../redux/selectors';
+import RootNavigation from '../../../navigation/rootNavigation';
 
 import { ModalHeader } from '../..';
 
@@ -21,12 +22,13 @@ interface HiveAuthModalProps {
 
 export const HiveAuthModal = forwardRef(({ onClose }: HiveAuthModalProps, ref) => {
   const intl = useIntl();
-  const navigation = useNavigation();
   const hiveAuth = useHiveAuth();
 
-  const isPinCodeOpen = useAppSelector((state) => state.application.isPinCodeOpen);
+  const isPinCodeOpen = useAppSelector(selectIsPinCodeOpen);
 
-  const bottomSheetModalRef = useRef();
+  const bottomSheetModalRef = useRef<any>(null);
+  const isMountedRef = useRef(true);
+  const successNavTimerRef = useRef<any>(null);
 
   const [initUsername, setInitUsername] = useState<string>();
 
@@ -38,7 +40,7 @@ export const HiveAuthModal = forwardRef(({ onClose }: HiveAuthModalProps, ref) =
     broadcastActiveOps: (opsArray: any) => {
       if (opsArray) {
         bottomSheetModalRef.current?.show();
-        handleBroadcastRequst(opsArray);
+        handleBroadcastRequest(opsArray);
       }
     },
   }));
@@ -46,27 +48,50 @@ export const HiveAuthModal = forwardRef(({ onClose }: HiveAuthModalProps, ref) =
   const handleAuthRequest = async (username: string) => {
     const success = await hiveAuth.authenticate(username);
 
-    // isLoggedInt
+    // Close modal and navigate on success
     if (success) {
-      if (isPinCodeOpen) {
-        navigation.navigate({
-          name: ROUTES.SCREENS.PINCODE,
-          params: {
-            navigateTo: ROUTES.DRAWER.MAIN,
-          },
-        });
-      } else {
-        navigation.navigate({
-          name: ROUTES.DRAWER.MAIN,
-        });
-      }
+      // Close the modal first to show the account switch
+      _closeModal();
+
+      // Small delay to let modal close animation finish and Redux updates to propagate
+      successNavTimerRef.current = setTimeout(() => {
+        if (!isMountedRef.current) {
+          return;
+        }
+
+        // Use RootNavigation to ensure we navigate from the root navigator
+        // This properly handles cases where HiveAuth is opened from Login screen
+        console.log('[HiveAuth] Navigating to main after successful login');
+        if (isPinCodeOpen) {
+          RootNavigation.reset({
+            index: 0,
+            routes: [
+              {
+                name: ROUTES.SCREENS.PINCODE,
+                params: {
+                  navigateTo: ROUTES.DRAWER.MAIN,
+                },
+              },
+            ],
+          });
+        } else {
+          RootNavigation.reset({
+            index: 0,
+            routes: [{ name: ROUTES.DRAWER.MAIN }],
+          });
+        }
+      }, 500); // Increased delay to ensure Redux updates complete
     }
   };
 
-  const handleBroadcastRequst = async (opsArray: Operation[]) => {
-    const success = await hiveAuth.broadcast(opsArray);
-    if (success) {
-      _closeModal();
+  const handleBroadcastRequest = async (opsArray: Operation[]) => {
+    try {
+      const result = await hiveAuth.broadcast(opsArray);
+      if (result) {
+        _closeModal();
+      }
+    } catch {
+      // useHiveAuth handles status/error state
     }
   };
 
@@ -76,6 +101,16 @@ export const HiveAuthModal = forwardRef(({ onClose }: HiveAuthModalProps, ref) =
       onClose();
     }
   };
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+      if (successNavTimerRef.current) {
+        clearTimeout(successNavTimerRef.current);
+        successNavTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const _renderContent = () => {
     const _content =
@@ -103,7 +138,7 @@ export const HiveAuthModal = forwardRef(({ onClose }: HiveAuthModalProps, ref) =
     <ActionSheet
       ref={bottomSheetModalRef}
       gestureEnabled={false}
-      hideUnderlay={true}
+      {...({ hideUnderlay: true } as any)}
       onClose={() => {
         hiveAuth.reset();
         setInitUsername(undefined);

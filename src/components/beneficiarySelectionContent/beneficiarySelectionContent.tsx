@@ -1,20 +1,33 @@
 import { debounce, isArray } from 'lodash';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useIntl } from 'react-intl';
-import { FlatList, Text, View } from 'react-native';
+import { Text, TouchableOpacity, View } from 'react-native';
 import EStyleSheet from 'react-native-extended-stylesheet';
+import { lookupAccountsQueryOptions, isThreeSpeakBeneficiary } from '@ecency/sdk';
+import { useQueryClient } from '@tanstack/react-query';
 import styles from './styles';
 
 import { CheckBox, FormInput, IconButton, TextButton } from '..';
+import type {} from '../formInput';
 import { useAppDispatch, useAppSelector } from '../../hooks';
-import { lookupAccounts } from '../../providers/hive/dhive';
 import { setBeneficiaries as setBeneficiariesAction } from '../../redux/actions/editorActions';
+import { toastNotification } from '../../redux/actions/uiAction';
 import { DEFAULT_USER_DRAFT_ID } from '../../redux/constants/constants';
 import { Beneficiary } from '../../redux/reducers/editorReducer';
-import { BENEFICIARY_SRC_ENCODER } from '../../providers/speak/constants';
+import {
+  DEFAULT_SUPPORT_PERCENT,
+  ECENCY_SUPPORT_ACCOUNT,
+  isEcencySupportBeneficiary,
+  isValidSupportSettings,
+} from '../../providers/ecency/supportBeneficiary';
+import {
+  useSupportSettingsQuery,
+  useSupportSettingsMutation,
+} from '../../providers/queries/settingsQueries';
+import { selectCurrentAccountName } from '../../redux/selectors';
 
 interface BeneficiarySelectionContentProps {
-  draftId: string;
+  draftId?: string;
   setDisableDone: (value: boolean) => void;
   powerDown?: boolean;
   label?: string;
@@ -38,14 +51,20 @@ const BeneficiarySelectionContent = ({
 }: BeneficiarySelectionContentProps) => {
   const intl = useIntl();
   const dispatch = useAppDispatch();
+  const queryClient = useQueryClient();
+
+  const supportSettingsQuery = useSupportSettingsQuery();
+  const supportSettingsMutation = useSupportSettingsMutation();
 
   const beneficiariesMap = useAppSelector((state) => state.editor.beneficiariesMap);
-  const username = useAppSelector((state) => state.account.currentAccount.name);
+  const username = useAppSelector(selectCurrentAccountName);
   const DEFAULT_BENEFICIARY = { account: username, weight: 10000 };
 
   const [beneficiaries, setBeneficiaries] = useState<Beneficiary[]>([
     { account: username, weight: 10000, autoPowerUp: false },
   ]);
+
+  const weightInputRef = useRef<any>(null);
 
   const [newUsername, setNewUsername] = useState('');
   const [newWeight, setNewWeight] = useState(0);
@@ -63,6 +82,48 @@ const BeneficiarySelectionContent = ({
   useEffect(() => {
     initBeneficiaries();
   }, [draftId, encodingBeneficiaries]);
+
+  // Reconcile the saved Support Ecency setting into the visible list so the
+  // modal shows exactly what publish will produce. Seeds the ecency row only
+  // when the user has no explicit beneficiary list persisted for this draft;
+  // an explicit list (created by any chip/add/remove action) is never touched.
+  // The seeded row itself is not persisted: publish derives the same row from
+  // the saved setting, and any user interaction persists the full list anyway.
+  useEffect(() => {
+    if (powerDown || handleSaveBeneficiary || !username || isEcencySupportBeneficiary(username)) {
+      return;
+    }
+
+    // wait for a successful settings load; never seed from unknown state
+    const savedPercent = supportSettingsQuery.data?.beneficiary_percent || 0;
+    if (savedPercent <= 0) {
+      return;
+    }
+
+    const _draftId = draftId || DEFAULT_USER_DRAFT_ID + username;
+    if (beneficiariesMap && Object.prototype.hasOwnProperty.call(beneficiariesMap, _draftId)) {
+      return;
+    }
+
+    const weight = savedPercent * 100;
+    setBeneficiaries((prevBeneficiaries) => {
+      if (
+        prevBeneficiaries.some((item) => isEcencySupportBeneficiary(item.account)) ||
+        !prevBeneficiaries.length ||
+        prevBeneficiaries[0].account !== username ||
+        prevBeneficiaries[0].weight < weight ||
+        prevBeneficiaries.length - 1 >= 8
+      ) {
+        return prevBeneficiaries;
+      }
+
+      const next = prevBeneficiaries.map((item, index) =>
+        index === 0 ? { ...item, weight: item.weight - weight } : item,
+      );
+      next.push({ account: ECENCY_SUPPORT_ACCOUNT, weight });
+      return next;
+    });
+  }, [supportSettingsQuery.data, beneficiariesMap, beneficiaries, draftId, username, powerDown]);
 
   useEffect(() => {
     setDisableDone(newEditable);
@@ -89,13 +150,15 @@ const BeneficiarySelectionContent = ({
   };
 
   const initBeneficiaries = async () => {
-    const _draftId = draftId || DEFAULT_USER_DRAFT_ID;
+    const _draftId = draftId || DEFAULT_USER_DRAFT_ID + username;
 
     let savedBeneficiareis: Beneficiary[] = [DEFAULT_BENEFICIARY, ...(encodingBeneficiaries || [])];
 
     if (beneficiariesMap && beneficiariesMap[_draftId]) {
       const _cachedBenef = beneficiariesMap[_draftId];
-      const _filteredBenef = _cachedBenef.filter((bene) => bene.src !== BENEFICIARY_SRC_ENCODER);
+      const _filteredBenef = _cachedBenef.filter(
+        (bene: any) => !isThreeSpeakBeneficiary(bene.account),
+      );
       savedBeneficiareis = [...savedBeneficiareis, ..._filteredBenef];
     }
 
@@ -117,7 +180,9 @@ const BeneficiarySelectionContent = ({
     if (handleSaveBeneficiary) {
       handleSaveBeneficiary(filteredBeneficiaries);
     } else {
-      dispatch(setBeneficiariesAction(draftId || DEFAULT_USER_DRAFT_ID, filteredBeneficiaries));
+      dispatch(
+        setBeneficiariesAction(draftId || DEFAULT_USER_DRAFT_ID + username, filteredBeneficiaries),
+      );
     }
   };
 
@@ -150,8 +215,15 @@ const BeneficiarySelectionContent = ({
   };
 
   const _onWeightInputChange = (value: string) => {
-    const _value = (parseInt(value, 10) || 0) * 100;
+    const parsed = parseInt(value, 10);
+    const numericText = Number.isFinite(parsed) && parsed >= 0 ? `${parsed}` : '';
+    if (numericText !== value) {
+      // Filter out non-numeric / negative input by re-feeding sanitized value to the field.
+      weightInputRef.current?.setText(numericText);
+    }
 
+    const sanitized = numericText === '' ? 0 : parseInt(numericText, 10);
+    const _value = sanitized * 100;
     const _diff = _value - newWeight;
     const newAuthorWeight = beneficiaries[0].weight - _diff;
     beneficiaries[0].weight = newAuthorWeight;
@@ -162,7 +234,7 @@ const BeneficiarySelectionContent = ({
   };
 
   const _lookupAccounts = debounce((username) => {
-    lookupAccounts(username).then((res) => {
+    queryClient.fetchQuery(lookupAccountsQueryOptions(username)).then((res) => {
       const isValid = res.includes(username);
       // check if username duplicates else lookup contacts, done here to avoid debounce and post call mismatch
       const notExistAlready = !beneficiaries.find((item) => item.account === username);
@@ -170,7 +242,7 @@ const BeneficiarySelectionContent = ({
     });
   }, 1000);
 
-  const _onUsernameInputChange = (value) => {
+  const _onUsernameInputChange = (value: any) => {
     setNewUsername(value);
     _lookupAccounts(value);
   };
@@ -186,6 +258,79 @@ const BeneficiarySelectionContent = ({
     setIsWeightValid(false);
     setIsUsernameValid(false);
     setNewUsername('');
+  };
+
+  // one-tap voluntary Support Ecency beneficiary
+  const _savedSupportPercent = supportSettingsQuery.data?.beneficiary_percent || 0;
+  const _supportPercent = _savedSupportPercent > 0 ? _savedSupportPercent : DEFAULT_SUPPORT_PERCENT;
+  const _ecencyBeneficiary = beneficiaries.find((item) => isEcencySupportBeneficiary(item.account));
+  const isSupportActive = !!_ecencyBeneficiary;
+  const _chipPercent = _ecencyBeneficiary
+    ? Math.round(_ecencyBeneficiary.weight / 100)
+    : _supportPercent;
+
+  // The settings update writes BOTH fields (backend contract), so it must
+  // read-modify-write from a successfully loaded payload. While settings are
+  // still loading or errored, the chip only changes this post's beneficiary
+  // list and skips the preference save; anything else could wipe the saved
+  // curation percent or overwrite a non-default beneficiary percent.
+  const _persistSupportPreference = (beneficiaryPercent: number) => {
+    const _settings = supportSettingsQuery.data;
+    if (!isValidSupportSettings(_settings)) {
+      return;
+    }
+    supportSettingsMutation.mutate({
+      beneficiary_percent: beneficiaryPercent,
+      curation_percent: _settings.curation_percent || 0,
+    });
+  };
+
+  const _onSupportEcencyPress = () => {
+    if (isSupportActive) {
+      const _removedWeight = beneficiaries.reduce(
+        (sum, item) => (isEcencySupportBeneficiary(item.account) ? sum + item.weight : sum),
+        0,
+      );
+      const _beneficiaries = beneficiaries.filter(
+        (item) => !isEcencySupportBeneficiary(item.account),
+      );
+      _beneficiaries[0] = {
+        ..._beneficiaries[0],
+        weight: _beneficiaries[0].weight + _removedWeight,
+      };
+      setBeneficiaries(_beneficiaries);
+      _saveBeneficiaries(_beneficiaries);
+      _persistSupportPreference(0);
+    } else {
+      const _weight = _supportPercent * 100;
+      // author row must retain non-negative weight and hive allows max 8 routes
+      if (beneficiaries[0].weight < _weight || beneficiaries.length - 1 >= 8) {
+        dispatch(toastNotification(intl.formatMessage({ id: 'alert.fail' })));
+        return;
+      }
+      const _beneficiaries = beneficiaries.map((item, index) =>
+        index === 0 ? { ...item, weight: item.weight - _weight } : item,
+      );
+      _beneficiaries.push({ account: ECENCY_SUPPORT_ACCOUNT, weight: _weight });
+      setBeneficiaries(_beneficiaries);
+      _saveBeneficiaries(_beneficiaries);
+      _persistSupportPreference(_supportPercent);
+    }
+  };
+
+  const _renderSupportEcency = () => {
+    if (powerDown || !username || isEcencySupportBeneficiary(username)) {
+      return null;
+    }
+
+    return (
+      <TouchableOpacity style={styles.supportEcencyContainer} onPress={_onSupportEcencyPress}>
+        <CheckBox locked isChecked={isSupportActive} clicked={_onSupportEcencyPress} />
+        <Text style={styles.supportEcencyLabel}>
+          {intl.formatMessage({ id: 'editor.support_ecency' }, { percent: _chipPercent })}
+        </Text>
+      </TouchableOpacity>
+    );
   };
 
   const _renderHeader = () => (
@@ -215,7 +360,7 @@ const BeneficiarySelectionContent = ({
     </View>
   );
 
-  const _handleCheckboxClick = (value, isCheck) => {
+  const _handleCheckboxClick = (value: any, isCheck: any) => {
     setNewAutoPowerUp(isCheck);
   };
   const _renderCheckBox = ({ locked, isChecked }: { locked: boolean; isChecked: boolean }) => (
@@ -224,7 +369,7 @@ const BeneficiarySelectionContent = ({
         locked={locked}
         isChecked={isChecked}
         clicked={_handleCheckboxClick}
-        value={newAutoPowerUp}
+        value={newAutoPowerUp as any}
       />
     </View>
   );
@@ -235,6 +380,7 @@ const BeneficiarySelectionContent = ({
         {powerDown && _renderCheckBox({ locked: false, isChecked: false })}
         <View style={styles.weightInput}>
           <FormInput
+            ref={weightInputRef}
             isValid={isWeightValid}
             value={`${newWeight / 100}`}
             inputStyle={styles.weightFormInput}
@@ -260,7 +406,7 @@ const BeneficiarySelectionContent = ({
             isFirstImage
             returnKeyType="done"
             value={newUsername}
-            onSubmitEditing={isWeightValid && isUsernameValid && _onSavePress}
+            onSubmitEditing={(isWeightValid && isUsernameValid && _onSavePress) as any}
             inputStyle={styles.usernameInput}
             wrapperStyle={styles.usernameFormInputWrapper}
           />
@@ -308,7 +454,7 @@ const BeneficiarySelectionContent = ({
     </>
   );
 
-  const _renderItem = ({ item, index }) => {
+  const _renderItem = (item: any, index: any) => {
     const _isCurrentUser = item.account === username;
 
     const _onRemovePress = () => {
@@ -323,7 +469,7 @@ const BeneficiarySelectionContent = ({
     };
 
     return (
-      <View style={styles.inputWrapper}>
+      <View key={`benef-${item.account}-${index}`} style={styles.inputWrapper}>
         {powerDown && _renderCheckBox({ locked: true, isChecked: item.autoPowerUp })}
         <View style={styles.weightInput}>
           <FormInput
@@ -346,7 +492,7 @@ const BeneficiarySelectionContent = ({
             wrapperStyle={styles.usernameFormInputWrapper}
           />
         </View>
-        {!_isCurrentUser && item.src !== BENEFICIARY_SRC_ENCODER ? (
+        {!_isCurrentUser && !isThreeSpeakBeneficiary(item.account) ? (
           <IconButton
             name="close"
             iconType="MaterialCommunityIcons"
@@ -367,12 +513,10 @@ const BeneficiarySelectionContent = ({
       <Text style={labelStyle || styles.settingLabel}>
         {label || intl.formatMessage({ id: 'editor.beneficiaries' })}
       </Text>
-      <FlatList
-        data={beneficiaries}
-        renderItem={_renderItem}
-        ListHeaderComponent={_renderHeader}
-        showsVerticalScrollIndicator={false}
-      />
+
+      {_renderSupportEcency()}
+      {_renderHeader()}
+      {beneficiaries.map(_renderItem)}
       {_renderFooter()}
     </View>
   );

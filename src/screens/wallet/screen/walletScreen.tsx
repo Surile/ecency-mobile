@@ -1,69 +1,69 @@
-/* eslint-disable react/jsx-wrap-multilines */
-import React, { Fragment, useState, useEffect, useRef } from 'react';
-import { SafeAreaView, View, Text, AppState, AppStateStatus } from 'react-native';
+import React, { useEffect, useRef, Fragment, useMemo } from 'react';
+import { View, Text, TouchableOpacity, AppState, AppStateStatus } from 'react-native';
 import { isArray } from 'lodash';
 
 // Containers
 import { RefreshControl, FlatList, gestureHandlerRootHOC } from 'react-native-gesture-handler';
 import { useIntl } from 'react-intl';
-import moment from 'moment';
 import { LoggedInContainer } from '../../../containers';
 
 // Components
-import { Header, HorizontalIconList, PostCardPlaceHolder } from '../../../components';
+import { Header, PostCardPlaceHolder } from '../../../components';
 
 // Styles
 import globalStyles from '../../../globalStyles';
 import styles from './walletScreenStyles';
 
 import { useAppDispatch, useAppSelector } from '../../../hooks';
-import { AssetCard, ManageAssetsBtn } from '../children';
-import { fetchMarketChart } from '../../../providers/coingecko/coingecko';
+import { AssetCard, WalletHeader } from '../children';
 import ROUTES from '../../../constants/routeNames';
 import { AssetDetailsScreenParams } from '../../assetDetails/screen/assetDetailsScreen';
-import POINTS, { POINTS_KEYS } from '../../../constants/options/points';
-import { AssetBase, CoinData } from '../../../redux/reducers/walletReducer';
+import { AssetBase, ProfileToken, TokenType } from '../../../redux/reducers/walletReducer';
 import {
   fetchCoinQuotes,
   resetWalletData,
-  setPriceHistory,
-  setSelectedCoins,
+  setSelectedAssets,
 } from '../../../redux/actions/walletActions';
-import DEFAULT_ASSETS, { ASSET_IDS } from '../../../constants/defaultAssets';
-import { fetchEngineMarketData } from '../../../providers/hive-engine/hiveEngine';
+import DEFAULT_ASSETS from '../../../constants/defaultAssets';
 import { walletQueries } from '../../../providers/queries';
+import { migrateSelectedTokens } from '../../../utils/migrationHelpers';
+import { PortfolioItem } from '../../../providers/ecency/ecency.types';
+import { formatAmount } from '../../../utils/number';
+import { selectCurrentAccount, selectIsDarkTheme, selectCurrency } from '../../../redux/selectors';
 
-const CHART_DAYS_RANGE = 7;
-
-const WalletScreen = ({ navigation }) => {
-  const intl = useIntl();
+const WalletScreen = ({ navigation }: { navigation: any }) => {
   const dispatch = useAppDispatch();
+  const intl = useIntl();
 
   // refs
   const appState = useRef(AppState.currentState);
 
   // redux
-  const isDarkTheme = useAppSelector((state) => state.application.isDarkTheme);
-  const currency = useAppSelector((state) => state.application.currency);
+  const isDarkTheme = useAppSelector(selectIsDarkTheme);
+  const currency = useAppSelector(selectCurrency);
 
-  const { selectedCoins, priceHistories, coinsData, updateTimestamp, quotes, ...wallet } =
-    useAppSelector((state) => state.wallet);
+  const { selectedAssets, quotes, ...wallet } = useAppSelector((state) => state.wallet);
 
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-
+  const currentAccount = useAppSelector(selectCurrentAccount);
   // queries
   const walletQuery = walletQueries.useAssetsQuery();
-  const unclaimedRewardsQuery = walletQueries.useUnclaimedRewardsQuery();
-  const claimRewardsMutation = walletQueries.useClaimRewardsMutation();
 
-  // state
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  const claimRewardsMutation = walletQueries.useClaimRewardsMutation();
+  const updateProfileTokensMutation = walletQueries.useUpdateProfileTokensMutation();
+
+  const currentLocale = intl.locale;
+
+  const walletListData = useMemo(
+    () =>
+      walletQuery.selectedData ? (walletQuery.selectedData.filter(Boolean) as PortfolioItem[]) : [],
+    [walletQuery.selectedData],
+  );
 
   // side-effects
   useEffect(() => {
     const appStateSub = AppState.addEventListener('change', _handleAppStateChange);
 
-    _fetchPriceHistory();
+    // _fetchPriceHistory();
 
     return () => {
       if (appStateSub) {
@@ -73,193 +73,171 @@ const WalletScreen = ({ navigation }) => {
   }, []);
 
   useEffect(() => {
-    if (currency.currency !== wallet.vsCurrency || currentAccount.username !== wallet.username) {
+    if (currency.currency !== wallet.vsCurrency || currentAccount.name !== wallet.username) {
       dispatch(resetWalletData());
       _refetchData();
     }
     _updateSelectedAssetsDataFromProfileJsonMeta();
   }, [currency, currentAccount]);
 
+  // add hook that checks and migrate token based on current account change
   useEffect(() => {
-    _fetchPriceHistory();
-  }, [selectedCoins]);
+    const tokens = currentAccount?.profile?.tokens;
+    if (tokens) {
+      const _migratedTokens = migrateSelectedTokens(tokens);
+      if (_migratedTokens) {
+        // update profile
+        updateProfileTokensMutation.mutate(_migratedTokens);
+      }
+    }
+  }, [currentAccount]);
+
+  // useEffect(() => {
+  //   _fetchPriceHistory();
+  // }, [selectedAssets]);
 
   // actions
-  const populateSelectedAssets = (tokensArr) => {
-    // filter out any other type of token other than ENGINE and SPK
+  const populateSelectedAssets = (tokensArr: ProfileToken[]): AssetBase[] => {
+    // filter out HIVE token, hidden tokens and legacy SPK entries (SPK support removed)
     return tokensArr
-      .filter(({ type }) => type === 'ENGINE' || type === 'SPK')
+      .filter(
+        ({ type, meta }) =>
+          type !== TokenType.HIVE && String(type) !== 'SPK' && (!meta || meta.show),
+      )
       .map(({ symbol, type }) => ({
         id: symbol,
         symbol,
-        isEngine: type === 'ENGINE',
-        isSpk: type === 'SPK',
+        isEngine: type === TokenType.ENGINE,
+        isChain: type === TokenType.CHAIN,
         notCrypto: false,
       }));
   };
 
+  // TODO: redo logic to update selected assets from profile json meta
   const _updateSelectedAssetsDataFromProfileJsonMeta = () => {
-    const currSelectedEngineTokens = selectedCoins.filter(
-      (item) => !DEFAULT_ASSETS.some((defaultAsset) => defaultAsset.id === item.id),
-    );
+    const currSelectedEngineTokens = selectedAssets.filter((item: AssetBase) => {
+      return !DEFAULT_ASSETS.some((defaultAsset) => defaultAsset.id === item.id);
+    });
 
-    if (isArray(currentAccount.about?.profile?.tokens)) {
-      const _selectedAssets = populateSelectedAssets(currentAccount.about.profile.tokens);
+    if (isArray(currentAccount.profile?.tokens)) {
+      const _selectedAssets = populateSelectedAssets(currentAccount.profile.tokens);
       // check if current selected engine tokens differ from profile json meta
       if (JSON.stringify(_selectedAssets) !== JSON.stringify(currSelectedEngineTokens)) {
-        dispatch(setSelectedCoins([...DEFAULT_ASSETS, ..._selectedAssets]));
+        dispatch(setSelectedAssets([...DEFAULT_ASSETS, ..._selectedAssets]));
       }
     }
   };
 
   const _handleAppStateChange = (nextAppState: AppStateStatus) => {
     if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
-      console.log('updating selected coins data on app resume');
       _refetchData();
     }
     appState.current = nextAppState;
   };
 
   const _refetchData = () => {
-    _fetchPriceHistory();
+    // _fetchPriceHistory();
     _refetchCoinsData();
-    unclaimedRewardsQuery.refetch();
+    // unclaimedRewardsQuery.refetch();
   };
 
-  const _fetchPriceHistory = () => {
-    selectedCoins.forEach(async (token: AssetBase) => {
-      const expiresAt = priceHistories[token.id]?.expiresAt || 0;
-      const curTime = new Date().getTime();
+  // const _fetchPriceHistory = () => {
+  //   selectedAssets.forEach(async (token: AssetBase) => {
+  //     const expiresAt = priceHistories[token.id]?.expiresAt || 0;
+  //     const curTime = new Date().getTime();
 
-      if (!token.notCrypto && curTime > expiresAt) {
-        let priceData: number[] = [];
+  //     if (!token.notCrypto && curTime > expiresAt) {
+  //       let priceData: number[] = [];
 
-        if (token.isEngine) {
-          const marketData = await fetchEngineMarketData(token.id);
-          priceData = marketData.map((data) => data.close);
-        } else if (token.isSpk) {
-          // TODO: add request to fetch chart data if available
-        } else {
-          const marketChart = await fetchMarketChart(token.id, currency.currency, CHART_DAYS_RANGE);
-          priceData = marketChart.prices.map((item) => item.yValue);
-        }
+  //       if (token.isEngine) {
+  //         const marketData = await fetchEngineMarketData(token.id);
+  //         priceData = marketData.map((data) => data.close);
+  //       } else {
+  //         const marketChart = await fetchMarketChart(token.id, currency.currency, CHART_DAYS_RANGE);
+  //         priceData = marketChart.prices.map((item) => item.yValue);
+  //       }
 
-        dispatch(setPriceHistory(token.id, currency.currency, priceData));
-      }
-    });
-  };
+  //       dispatch(setPriceHistory(token.id, currency.currency, priceData));
+  //     }
+  //   });
+  // };
 
   const _refetchCoinsData = async () => {
     if (!quotes) {
       dispatch(fetchCoinQuotes());
     }
 
-    await walletQuery.refetch();
-    setIsRefreshing(false);
-  };
-
-  const _claimRewards = (assetId: string) => {
-    // claim using mutation;
-    claimRewardsMutation.mutate({ assetId });
-  };
-
-  const _showAssetsSelectModal = () => {
-    navigation.navigate(ROUTES.MODALS.ASSETS_SELECT);
-  };
-
-  const _renderItem = ({ item, index }: { item: AssetBase; index: number }) => {
-    const coinData: CoinData = coinsData && coinsData[item.id];
-
-    if (!coinData) {
-      return null;
+    // getPortfolio throws when called without a username, and refetch() bypasses the
+    // query's enabled:!!currentAccount?.name gate (e.g. the logout transition forces a
+    // refetch with an empty name). Skip the portfolio refetch when logged out.
+    if (!currentAccount?.name) {
+      return;
     }
+    walletQuery.refetch();
+  };
 
-    const unclaimedRewards =
-      (unclaimedRewardsQuery.data && unclaimedRewardsQuery.data[item.id]) || '';
+  const _claimRewards = (symbol: string) => {
+    // claim using mutation;
+    claimRewardsMutation.mutate({ symbol });
+  };
 
-    const _isClaimingThis = claimRewardsMutation.checkIsClaiming(item.id);
-    const _isClaimingAny = claimRewardsMutation.checkIsClaiming();
+  const _onRefresh = () => {
+    if (!walletQuery.isFetching) {
+      _refetchData();
+    }
+  };
 
-    // const _tokenMarketData: number[] =
-    //   priceHistories && priceHistories[item.id] ? priceHistories[item.id].data : [];
-    const quote = quotes && quotes[item.id];
+  const _renderItem = ({ item }: { item: PortfolioItem }) => {
+    const unclaimedRewardsValue =
+      typeof item.pendingRewards === 'number' && item.pendingRewards > 0
+        ? formatAmount(item.pendingRewards, {
+            locale: currentLocale,
+            minimumFractionDigits: 3,
+            maximumFractionDigits: 3,
+          })
+        : '';
+    const unclaimedRewards = unclaimedRewardsValue ? `${unclaimedRewardsValue} ${item.symbol}` : '';
 
-    const _balance = coinData.balance + (coinData.savings || 0);
-
-    const percentChange = quote ? quote.percentChange : coinData.percentChange;
+    const _isClaimingThis = claimRewardsMutation.checkIsClaiming(item.symbol);
 
     const _onCardPress = () => {
       navigation.navigate(ROUTES.SCREENS.ASSET_DETAILS, {
-        coinId: item.id,
+        asset: item,
       } as AssetDetailsScreenParams);
     };
 
     const _onClaimPress = () => {
       if (unclaimedRewards) {
-        _claimRewards(item.id);
-      } else if (item.id === ASSET_IDS.ECENCY) {
-        navigation.navigate(ROUTES.SCREENS.BOOST);
+        _claimRewards(item.symbol);
+      } else if (item.symbol === 'POINTS') {
+        navigation.navigate(ROUTES.SCREENS.BOOST, { username: currentAccount?.name });
       }
-    };
-
-    const _onBoostAccountPress = () => {
-      navigation.navigate({
-        name: ROUTES.SCREENS.ACCOUNT_BOOST,
-        params: {
-          username: currentAccount.name,
-        },
-      });
     };
 
     return (
       <AssetCard
-        name={coinData.name}
-        iconUrl={coinData.iconUrl}
-        // chartData={_tokenMarketData || []}
-        currentValue={quote?.price || coinData?.currentPrice || 0}
-        changePercent={percentChange || 0}
+        symbol={item.symbol}
+        name={item.name}
+        iconUrl={item.iconUrl}
+        currentValue={item.fiatRate || 0}
         currencySymbol={currency.currencySymbol}
-        ownedBalance={_balance}
+        currencyCode={currency.currency}
+        locale={currentLocale}
+        ownedBalance={item.balance || 0}
         unclaimedRewards={unclaimedRewards}
-        enableBuy={!coinData.unclaimedBalance && item.id === ASSET_IDS.ECENCY}
+        enableBuy={false}
         isClaiming={_isClaimingThis}
-        isLoading={unclaimedRewardsQuery.isFetching && !_isClaimingAny}
-        volume24h={coinData.volume24h}
-        precision={coinData.precision}
         onCardPress={_onCardPress}
         onClaimPress={_onClaimPress}
-        onBoostAccountPress={_onBoostAccountPress}
-        footerComponent={
-          index === 0 && <HorizontalIconList options={POINTS} optionsKeys={POINTS_KEYS} />
-        }
-        {...item}
+        footerComponent={null}
       />
-    );
-  };
-
-  const _renderHeader = () => {
-    return (
-      <View style={styles.header}>
-        <Text style={styles.lastUpdateText}>
-          {walletQuery.isFetching
-            ? intl.formatMessage({ id: 'wallet.updating' })
-            : `${intl.formatMessage({ id: 'wallet.last_updated' })} ${moment(
-                updateTimestamp,
-              ).format('HH:mm:ss')}`}
-        </Text>
-      </View>
     );
   };
 
   const _refreshControl = (
     <RefreshControl
-      refreshing={isRefreshing}
-      onRefresh={() => {
-        if (!isRefreshing) {
-          setIsRefreshing(true);
-          _refetchData();
-        }
-      }}
+      refreshing={false}
+      onRefresh={_onRefresh}
       progressBackgroundColor="#357CE6"
       tintColor={!isDarkTheme ? '#357ce6' : '#96c0ff'}
       titleColor="#fff"
@@ -267,31 +245,61 @@ const WalletScreen = ({ navigation }) => {
     />
   );
 
+  // When the portfolio request fails (e.g. the Ecency proxy hiccups) surface a Retry
+  // banner. It is rendered above the list rather than as ListEmptyComponent because
+  // React Query keeps the last successful data on error — so a failed *refresh* of an
+  // already-loaded wallet has a non-empty list and would otherwise show no indication
+  // the data is stale. Shown only once a fetch has actually failed and settled.
+  const _renderErrorBanner = () => {
+    if (!walletQuery.isError || walletQuery.isFetching) {
+      return null;
+    }
+    return (
+      <View style={styles.errorBanner}>
+        <Text style={styles.errorText}>
+          {intl.formatMessage({ id: 'alert.wallet_refresh_failed' })}
+        </Text>
+        <TouchableOpacity style={styles.headerActionButton} onPress={_onRefresh}>
+          <Text style={styles.headerActionButtonText}>
+            {intl.formatMessage({ id: 'alert.something_wrong_reload' })}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
+  const _renderWalletHeader = () => (
+    <WalletHeader
+      assets={walletQuery.data}
+      currencyCode={currency.currency}
+      currencySymbol={currency.currencySymbol}
+      lastUpdated={walletQuery.dataUpdatedAt || 0}
+      updating={walletQuery.isFetching}
+      onRefresh={_onRefresh}
+    />
+  );
+
   return (
     <Fragment>
-      <Header />
-      <SafeAreaView style={globalStyles.defaultContainer}>
-        <LoggedInContainer>
-          {() => (
-            <View style={styles.listWrapper}>
-              <FlatList
-                data={updateTimestamp ? selectedCoins : []}
-                extraData={[coinsData, priceHistories, unclaimedRewardsQuery.data]}
-                style={globalStyles.tabBarBottom}
-                ListEmptyComponent={<PostCardPlaceHolder />}
-                ListHeaderComponent={_renderHeader}
-                ListFooterComponent={<ManageAssetsBtn onPress={_showAssetsSelectModal} />}
-                renderItem={_renderItem}
-                keyExtractor={(item, index) => index.toString()}
-                refreshControl={_refreshControl}
-              />
-            </View>
-          )}
-        </LoggedInContainer>
-      </SafeAreaView>
+      <Header showQR={true} />
+      <LoggedInContainer>
+        {() => (
+          <View style={styles.listWrapper}>
+            {_renderErrorBanner()}
+            <FlatList
+              data={walletListData}
+              style={globalStyles.tabBarBottom}
+              ListEmptyComponent={walletQuery.isFetching ? <PostCardPlaceHolder /> : null}
+              ListHeaderComponent={_renderWalletHeader}
+              renderItem={_renderItem}
+              keyExtractor={(item, index) => item.symbol + index}
+              refreshControl={_refreshControl}
+            />
+          </View>
+        )}
+      </LoggedInContainer>
     </Fragment>
   );
 };
 
 export default gestureHandlerRootHOC(WalletScreen);
-/* eslint-enable */

@@ -22,6 +22,8 @@ const CommunitiesScreen = () => {
   const intl = useIntl();
 
   const [index, setIndex] = React.useState(0);
+  const joinedListRef = React.useRef<any>(null);
+  const discoverListRef = React.useRef<any>(null);
   const [routes] = React.useState([
     {
       key: 'joined',
@@ -53,7 +55,7 @@ const CommunitiesScreen = () => {
         handleGetSubscriptions,
         isSubscriptionsLoading,
         isDiscoversLoading,
-      }) => {
+      }: any) => {
         return (
           <SafeAreaView style={styles.container}>
             <BasicHeader
@@ -63,9 +65,20 @@ const CommunitiesScreen = () => {
             />
             <TabView
               navigationState={{ index, routes }}
-              style={[globalStyles.tabView, { paddingBottom: 40 }]}
+              style={[globalStyles.tabView]}
               onIndexChange={setIndex}
-              renderTabBar={TabBar}
+              renderTabBar={(tabProps) => (
+                <TabBar
+                  {...tabProps}
+                  onTabPress={({ route }) => {
+                    const listRef = route.key === 'discover' ? discoverListRef : joinedListRef;
+                    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+                  }}
+                />
+              )}
+              commonOptions={{
+                labelStyle: styles.tabLabelColor,
+              }}
               renderScene={({ route }) => {
                 switch (route.key) {
                   case 'joined':
@@ -79,6 +92,7 @@ const CommunitiesScreen = () => {
                           handleGetSubscriptions={handleGetSubscriptions}
                           handleDiscoverPress={_handleDiscoverPress}
                           isLoading={isSubscriptionsLoading}
+                          listRef={joinedListRef}
                         />
                       </View>
                     );
@@ -94,6 +108,7 @@ const CommunitiesScreen = () => {
                           noResult={discovers.length === 0}
                           screen="communitiesScreenDiscoverTab"
                           isDiscoversLoading={isDiscoversLoading}
+                          listRef={discoverListRef}
                         />
                       </View>
                     );

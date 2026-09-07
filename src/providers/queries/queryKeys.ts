@@ -10,7 +10,7 @@ const QUERIES = {
     GET: 'QUERY_GET_SCHEDULES',
   },
   NOTIFICATIONS: {
-    GET: 'QERUY_GET_NOTIFICATIONS',
+    GET: 'notifications', // Changed to match SDK query key pattern
   },
   ANNOUNCEMENTS: {
     GET: 'QERUY_GET_ANNOUNCEMENTS',
@@ -23,19 +23,20 @@ const QUERIES = {
     GET_VIDEOS: 'QUERY_GET_VIDEO_UPLOADS',
   },
   WALLET: {
-    GET: 'QUERY_GET_ASSETS',
-    UNCLAIMED_GET: 'QUERY_GET_UNCLAIMED',
+    // Portfolio, recurring transfers, and pending requests now use SDK query keys directly.
+    // Only engine activities remain mobile-specific.
     GET_ACTIVITIES: 'QUERY_GET_ACTIVITIES',
-    GET_PENDING_REQUESTS: 'GET_PENDING_REQUESTS',
   },
   POST: {
     GET: 'QUERY_GET_POST',
     GET_POLL: 'QUERY_GET_POLL',
     GET_DISCUSSION: 'QUERY_GET_DISCUSSION',
     GET_BOT_AUTHERS: 'BOT_AUTHERS',
+    GET_TIPS: 'QUERY_GET_POST_TIPS',
     SIGN_POLL_VOTE: 'SIGN_POLL_VOTE',
     GET_REBLOGS: 'GET_REBLOGS',
     REBLOG_POST: 'REBLOG_POST',
+    CROSS_POST: 'CROSS_POST',
   },
   PLAUSIBLE: {
     GET_POST_STATS: 'QUERY_PLAUSIBLE_GET_POST_STATS',
@@ -44,10 +45,6 @@ const QUERIES = {
   },
   LEADERBOARD: {
     GET: 'QUERY_GET_LEADERBOARD',
-  },
-  WAVES: {
-    GET: 'QUERY_GET_WAVES',
-    INITIAL_CONTAINERS: 'QUERY_DATA_INITIAL_CONTAINERS',
   },
   SETTINGS: {
     GET_SERVERS: 'QUERY_GET_SERVERS_LIST',

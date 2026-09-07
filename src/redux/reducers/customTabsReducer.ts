@@ -9,6 +9,8 @@ import {
   SET_MAIN_TABS,
   SET_OWN_PROFILE_TABS,
   SET_PROFILE_TABS,
+  SET_WAVE_CONTAINERS,
+  SET_WAVE_TAGS,
 } from '../constants/constants';
 
 interface State {
@@ -16,6 +18,8 @@ interface State {
   mainTabs: string[];
   profileTabs: string[];
   ownProfileTabs: string[];
+  waveTags: string[];
+  waveContainers: string[];
 }
 
 const initialState: State = {
@@ -23,9 +27,11 @@ const initialState: State = {
   mainTabs: DEFAULT_FEED_FILTERS,
   profileTabs: DEFAULT_PROFILE_FILTERS,
   ownProfileTabs: DEFAULT_OWN_PROFILE_FILTERS,
+  waveTags: [],
+  waveContainers: [],
 };
 
-const customTabsReducer = (state: State = initialState, action): State => {
+const customTabsReducer = (state: State = initialState, action: any): State => {
   switch (action.type) {
     case SET_MAIN_TABS:
       return {
@@ -49,6 +55,18 @@ const customTabsReducer = (state: State = initialState, action): State => {
       return {
         ...state,
         ownProfileTabs: action.payload,
+      };
+
+    case SET_WAVE_TAGS:
+      return {
+        ...state,
+        waveTags: action.payload,
+      };
+
+    case SET_WAVE_CONTAINERS:
+      return {
+        ...state,
+        waveContainers: action.payload,
       };
 
     default:

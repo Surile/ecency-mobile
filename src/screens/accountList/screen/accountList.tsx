@@ -1,10 +1,11 @@
 import React from 'react';
-import { FlatList, SafeAreaView } from 'react-native';
+import { FlatList, Platform } from 'react-native';
 import { useIntl } from 'react-intl';
 
 // Components
 import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
-import { BasicHeader, UserListItem } from '../../../components';
+import { Edges, SafeAreaView } from 'react-native-safe-area-context';
+import { SearchInput, UserListItem } from '../../../components';
 
 // Container
 import AccountListContainer from '../../../containers/accountListContainer';
@@ -13,10 +14,14 @@ import AccountListContainer from '../../../containers/accountListContainer';
 import globalStyles from '../../../globalStyles';
 import { getTimeFromNow } from '../../../utils/time';
 
-const AccountList = ({ route }) => {
+const AccountList = ({ route, navigation }: any) => {
   const intl = useIntl();
 
   const users = route.params?.users || [];
+
+  const _navigationGoBack = () => {
+    navigation.goBack();
+  };
 
   const headerTitle =
     route.params?.title ||
@@ -24,17 +29,26 @@ const AccountList = ({ route }) => {
       id: 'account_list.title',
     });
 
+  // for modals, iOS has its own safe area handling
+  const _safeAreaEdges: Edges = Platform.select({ ios: ['bottom'], default: ['top', 'bottom'] });
+
   return (
     <AccountListContainer data={users}>
-      {({ data, filterResult, handleSearch, handleOnUserPress }) => (
-        <SafeAreaView style={[globalStyles.container, { paddingBottom: 40 }]}>
-          <BasicHeader
-            title={`${headerTitle} (${data && data.length})`}
+      {({ data, filterResult, handleSearch, handleOnUserPress }: any) => (
+        <SafeAreaView style={[globalStyles.container]} edges={_safeAreaEdges}>
+          <SearchInput
+            showClearButton={true}
+            placeholder={`${headerTitle} (${data && data.length})`}
+            onChangeText={(text: any) => {
+              handleSearch(text, 'account');
+            }}
+            backEnabled={true}
+            autoFocus={false}
+            onBackPress={_navigationGoBack}
             backIconName="close"
-            isHasSearch
-            handleOnSearch={(text) => handleSearch(text, 'account')}
           />
           <FlatList
+            style={{ flex: 1, marginTop: 16 }}
             data={filterResult || data}
             keyExtractor={(item) => item.account}
             removeClippedSubviews={false}
@@ -48,7 +62,7 @@ const AccountList = ({ route }) => {
 
 export default gestureHandlerRootHOC(AccountList);
 
-const renderUserListItem = (item, index, handleOnUserPress) => {
+const renderUserListItem = (item: any, index: any, handleOnUserPress: any) => {
   return (
     <UserListItem
       index={index}

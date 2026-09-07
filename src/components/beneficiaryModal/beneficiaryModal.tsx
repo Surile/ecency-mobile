@@ -1,13 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { View, FlatList, Text } from 'react-native';
 import { useIntl } from 'react-intl';
 import { isArray, debounce } from 'lodash';
 
 import EStyleSheet from 'react-native-extended-stylesheet';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
-import { lookupAccounts } from '../../providers/hive/dhive';
+import { lookupAccountsQueryOptions } from '@ecency/sdk';
+import { useQueryClient } from '@tanstack/react-query';
 
 import { FormInput, MainButton, TextButton } from '..';
+import type {} from '../formInput';
 
 import styles from './beneficiaryModalStyles';
 import IconButton from '../iconButton';
@@ -21,14 +23,17 @@ interface BeneficiaryModal {
   handleOnSaveBeneficiaries: () => void;
 }
 
-const BeneficiaryModal = ({ username, handleOnSaveBeneficiaries, draftId }) => {
+const BeneficiaryModal = ({ username, handleOnSaveBeneficiaries, draftId }: any) => {
   const intl = useIntl();
+  const queryClient = useQueryClient();
 
   const beneficiariesMap = useAppSelector((state) => state.editor.beneficiariesMap);
 
   const [beneficiaries, setBeneficiaries] = useState<Beneficiary[]>([
     { account: username, weight: 10000, isValid: true },
   ]);
+
+  const weightInputRef = useRef<any>(null);
 
   const [newUsername, setNewUsername] = useState('');
   const [newWeight, setNewWeight] = useState(0);
@@ -79,8 +84,15 @@ const BeneficiaryModal = ({ username, handleOnSaveBeneficiaries, draftId }) => {
     setNewEditable(true);
   };
 
-  const _onWeightInputChange = (value) => {
-    const _value = (parseInt(value, 10) || 0) * 100;
+  const _onWeightInputChange = (value: any) => {
+    const parsed = parseInt(value, 10);
+    const numericText = Number.isFinite(parsed) && parsed >= 0 ? `${parsed}` : '';
+    if (numericText !== value) {
+      weightInputRef.current?.setText(numericText);
+    }
+
+    const sanitized = numericText === '' ? 0 : parseInt(numericText, 10);
+    const _value = sanitized * 100;
     const _diff = _value - newWeight;
     beneficiaries[0].weight -= _diff;
     setNewWeight(_value);
@@ -89,7 +101,7 @@ const BeneficiaryModal = ({ username, handleOnSaveBeneficiaries, draftId }) => {
   };
 
   const _lookupAccounts = debounce((username) => {
-    lookupAccounts(username).then((res) => {
+    queryClient.fetchQuery(lookupAccountsQueryOptions(username)).then((res) => {
       const isValid = res.includes(username);
       // check if username duplicates else lookup contacts, done here to avoid debounce and post call mismatch
       const notExistAlready = !beneficiaries.find((item) => item.account === username);
@@ -97,7 +109,7 @@ const BeneficiaryModal = ({ username, handleOnSaveBeneficiaries, draftId }) => {
     });
   }, 1000);
 
-  const _onUsernameInputChange = (value) => {
+  const _onUsernameInputChange = (value: any) => {
     setNewUsername(value);
     _lookupAccounts(value);
   };
@@ -142,6 +154,7 @@ const BeneficiaryModal = ({ username, handleOnSaveBeneficiaries, draftId }) => {
       <View style={styles.inputWrapper}>
         <View style={styles.weightInput}>
           <FormInput
+            ref={weightInputRef}
             isValid={isWeightValid}
             value={`${newWeight / 100}`}
             inputStyle={styles.weightFormInput}
@@ -202,7 +215,7 @@ const BeneficiaryModal = ({ username, handleOnSaveBeneficiaries, draftId }) => {
     </>
   );
 
-  const _renderItem = ({ item, index }) => {
+  const _renderItem = ({ item, index }: any) => {
     const _isCurrentUser = item.account === username;
 
     const _onRemovePress = () => {

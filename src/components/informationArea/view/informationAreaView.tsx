@@ -11,7 +11,7 @@ import ROUTES from '../../../constants/routeNames';
 // Styles
 import styles from './informationAreaStyles';
 
-const FormInputView = ({ description, iconName, bold, link }) => {
+const FormInputView = ({ description, iconName, bold, link }: any) => {
   const navigation = useNavigation();
 
   const _onPress = () => {

@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, Platform } from 'react-native';
-import { debounce } from 'lodash';
+import { View, Text, Platform, TextInput as RNTextInput } from 'react-native';
 // Constants
 
 // Components
@@ -15,108 +14,150 @@ import { useAppDispatch, useAppSelector } from '../../../../hooks';
 import { Tag } from '../../../basicUIElements';
 import { isCommunity } from '../../../../utils/communityValidation';
 import { toastNotification } from '../../../../redux/actions/uiAction';
+import { selectIsDarkTheme } from '../../../../redux/selectors';
 
 const SEPARATOR_REGEX = /[,\s]/;
 
-const TagInput = ({ value, handleTagChanged, intl, isPreviewActive, autoFocus, setCommunity }) => {
+const TagInput = ({
+  value,
+  handleTagChanged,
+  intl,
+  isPreviewActive,
+  autoFocus,
+  setCommunity,
+}: any) => {
   const dispatch = useAppDispatch();
-  const isDarkTheme = useAppSelector((state) => state.application.isDarkTheme);
+  const isDarkTheme = useAppSelector(selectIsDarkTheme);
 
-  const scrollRef = useRef<ScrollView>();
+  const scrollRef = useRef<ScrollView | null>(null);
+  const inputRef = useRef<RNTextInput>(null);
+  const textRef = useRef('');
+  const tagsRef = useRef<string[]>([]);
 
   const [tags, setTags] = useState<string[]>([]);
   const [text, setText] = useState('');
   const [warning, setWarning] = useState(null);
 
+  // Keep tagsRef in sync with tags state
+  useEffect(() => {
+    tagsRef.current = tags;
+  }, [tags]);
+
   useEffect(() => {
     // read and add tag items
-    const _tags = (typeof value === 'string' ? value.split(' ') : value).filter((t) => !!t);
+    const _tags = (typeof value === 'string' ? value.split(' ') : value).filter((t: any) => !!t);
+    tagsRef.current = _tags;
     setTags(_tags);
     _verifyTagsUpdate(_tags);
   }, [value]);
 
-  const _verifyTagsUpdate = (tags: string[]) => {
-    if (tags.length > 0) {
-      tags.length > 10
+  const _verifyTagsUpdate = (nextTags: string[]) => {
+    if (nextTags.length > 0) {
+      nextTags.length > 10
         ? setWarning(intl.formatMessage({ id: 'editor.limited_tags' }))
-        : tags.find((c) => c.length > 24)
+        : nextTags.find((c) => c.length > 24)
         ? setWarning(intl.formatMessage({ id: 'editor.limited_length' }))
-        : tags.find((c) => c.split('-').length > 2)
+        : nextTags.find((c) => c.split('-').length > 2)
         ? setWarning(intl.formatMessage({ id: 'editor.limited_dash' }))
-        : tags.find((c) => c.indexOf(',') >= 0)
+        : nextTags.find((c) => c.indexOf(',') >= 0)
         ? setWarning(intl.formatMessage({ id: 'editor.limited_space' }))
-        : tags.find((c) => /[A-Z]/.test(c))
+        : nextTags.find((c) => /[A-Z]/.test(c))
         ? setWarning(intl.formatMessage({ id: 'editor.limited_lowercase' }))
-        : tags.find((c) => !/^[a-z0-9-#]+$/.test(c))
+        : nextTags.find((c) => !/^[a-z0-9-#]+$/.test(c))
         ? setWarning(intl.formatMessage({ id: 'editor.limited_characters' }))
-        : tags.find((c) => !/[a-z0-9]$/.test(c))
+        : nextTags.find((c) => !/[a-z0-9]$/.test(c))
         ? setWarning(intl.formatMessage({ id: 'editor.limited_lastchar' }))
         : setWarning(null);
     }
   };
 
-  const _registerNewTags = useCallback(
-    debounce((newTags: string[], skipLast = true) => {
-      const inputVal = newTags.length > 0 && skipLast && newTags.pop();
+  const _setInputText = useCallback((nextText: string) => {
+    textRef.current = nextText;
+    setText(nextText);
+  }, []);
 
-      newTags.forEach((tag) => {
-        if (tag.startsWith('#')) {
-          tag = tag.substring(1);
-        }
+  const _registerNewTags = useCallback(
+    (newTags: string[], skipLast = true) => {
+      const inputVal = newTags.length > 0 && skipLast ? newTags[newTags.length - 1] : '';
+      const tagsToProcess = skipLast ? newTags.slice(0, -1) : newTags;
+      const updatedTags = [...tagsRef.current];
+
+      tagsToProcess.forEach((rawTag) => {
+        const tag = rawTag.startsWith('#') ? rawTag.substring(1) : rawTag;
 
         if (!tag.length) {
           return;
         }
 
-        if (!tags.includes(tag)) {
+        if (!updatedTags.includes(tag)) {
           // check if tag is community and post communtiy is not already selected
-          if (isCommunity(tag) && !isCommunity(tags[0])) {
+          if (isCommunity(tag) && !isCommunity(updatedTags[0])) {
             // add community tag
-            tags.splice(0, 0, tag);
+            updatedTags.splice(0, 0, tag);
             setCommunity(tag);
             dispatch(toastNotification(intl.formatMessage({ id: 'editor.community_selected' })));
           } else {
             // add simple tag
-            tags.push(tag);
+            updatedTags.push(tag);
           }
         } else {
           dispatch(toastNotification(intl.formatMessage({ id: 'editor.tag_duplicate' })));
         }
       });
 
-      setTags([...tags]);
-      setText(inputVal || '');
-      _verifyTagsUpdate(tags);
+      tagsRef.current = updatedTags;
+      setTags(updatedTags);
+      const newText = inputVal || '';
+      // Replace the field with the remaining unfinished tag fragment. Always write it:
+      // on Android/iOS a stale native event can otherwise leave the tokenized tag visible.
+      _setInputText(newText);
+      _verifyTagsUpdate(updatedTags);
       if (handleTagChanged) {
-        handleTagChanged([...tags]);
+        handleTagChanged(updatedTags);
       }
       setTimeout(() => {
         if (scrollRef.current) {
           scrollRef.current.scrollToEnd();
         }
       }, 100);
-    }, 500),
-    [tags],
+    },
+    [dispatch, intl, setCommunity, handleTagChanged, _setInputText],
   );
 
   const _handleOnChange = (val: string) => {
+    // val is already lowercased by the caller wrapper at the TextInput callsite.
+    if (SEPARATOR_REGEX.test(val)) {
+      _registerNewTags(val.split(SEPARATOR_REGEX));
+      return;
+    }
+    textRef.current = val;
     setText(val);
-    _registerNewTags(val.split(SEPARATOR_REGEX));
+  };
+
+  const _handleOnChangeRaw = (raw: string) => {
+    const lower = raw.toLowerCase();
+    if (lower !== raw) {
+      // Filter to lowercase by re-feeding sanitized text to the field.
+      _setInputText(lower);
+    }
+    _handleOnChange(lower);
   };
 
   const _handleOnEnd = () => {
-    if (text.length > 1) {
-      _registerNewTags(text.split(SEPARATOR_REGEX), false);
+    if (textRef.current.length > 1) {
+      _registerNewTags(textRef.current.split(SEPARATOR_REGEX), false);
     }
   };
 
-  const _renderTag = (tag, index) => {
+  const _renderTag = (tag: any, index: any) => {
     const _onPress = () => {
-      tags.splice(index, 1);
-      setTags([...tags]);
-      _verifyTagsUpdate(tags);
+      const updatedTags = [...tags];
+      updatedTags.splice(index, 1);
+      tagsRef.current = updatedTags;
+      setTags(updatedTags);
+      _verifyTagsUpdate(updatedTags);
       if (handleTagChanged) {
-        handleTagChanged([...tags]);
+        handleTagChanged(updatedTags);
       }
     };
 
@@ -133,7 +174,6 @@ const TagInput = ({ value, handleTagChanged, intl, isPreviewActive, autoFocus, s
     );
   };
 
-  console.log('text : ', text, '\nvalue : ', value);
   return (
     <View style={[globalStyles.containerHorizontal16, styles.container]}>
       <ScrollView
@@ -144,6 +184,8 @@ const TagInput = ({ value, handleTagChanged, intl, isPreviewActive, autoFocus, s
       >
         {tags.map(_renderTag)}
         <TextInput
+          key="tag-input"
+          innerRef={inputRef}
           style={styles.textInput}
           placeholderTextColor={isDarkTheme ? '#526d91' : '#c1c5c7'}
           editable={!isPreviewActive}
@@ -151,15 +193,16 @@ const TagInput = ({ value, handleTagChanged, intl, isPreviewActive, autoFocus, s
           placeholder={intl.formatMessage({
             id: 'editor.tags',
           })}
-          autoCompleteType="off"
           autoCorrect={false}
+          autoComplete="off"
+          spellCheck={false}
           autoFocus={autoFocus}
           autoCapitalize="none"
           keyboardType={Platform.select({
             ios: 'ascii-capable',
             android: 'visible-password',
           })}
-          onChangeText={(val) => _handleOnChange(val.toLowerCase())}
+          onChangeText={_handleOnChangeRaw}
           onEndEditing={_handleOnEnd}
           value={text}
         />

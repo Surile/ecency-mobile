@@ -1,54 +1,31 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useDispatch } from 'react-redux';
 import { useIntl } from 'react-intl';
+import {
+  getPollQueryOptions,
+  usePollVote,
+  QueryKeys,
+  type Poll,
+  type PollChoice,
+} from '@ecency/sdk';
 import QUERIES from '../queryKeys';
-import { castPollVote, getPollData } from '../../polls/polls';
 import { PostMetadata } from '../../hive/hive.types';
-import { Poll, PollChoice } from '../../polls/polls.types';
 import { useAppSelector } from '../../../hooks';
 import parseToken from '../../../utils/parseToken';
 import { vestsToHp } from '../../../utils/conversions';
 import { updatePollVoteCache } from '../../../redux/actions/cacheActions';
 import { CacheStatus, PollVoteCache } from '../../../redux/reducers/cacheReducer';
 import { toastNotification } from '../../../redux/actions/uiAction';
+import { selectCurrentAccount, selectGlobalProps } from '../../../redux/selectors';
+import { useAuthContext } from '../../sdk/useAuthContext';
 
 /** hook used to return post poll */
-export const useGetPollQuery = (_author?: string, _permlink?: string, metadata?: PostMetadata) => {
+export const useGetPollQuery = (_author?: string, _permlink?: string, _metadata?: PostMetadata) => {
   const [author, setAuthor] = useState(_author);
   const [permlink, setPermlink] = useState(_permlink);
 
-  // post process initial post if available
-  const _initialPollData = useMemo(() => {
-    // TODO: convert metadata to Poll data;
-
-    return null;
-  }, [metadata]);
-
-  const query = useQuery(
-    [QUERIES.POST.GET_POLL, author, permlink],
-    async () => {
-      if (!author || !permlink) {
-        return null;
-      }
-
-      try {
-        const pollData = await getPollData(author, permlink);
-        if (!pollData) {
-          new Error('Poll data unavailable');
-        }
-
-        return pollData;
-      } catch (err) {
-        console.warn('Failed to get post', err);
-        throw err;
-      }
-    },
-    {
-      initialData: _initialPollData,
-      cacheTime: 30 * 60 * 1000, // keeps cache for 30 minutes
-    },
-  );
+  const query = useQuery(getPollQueryOptions(author, permlink));
 
   // TODO: use injectPollVoteCache here for simplifity and code reuseability
   const data = useInjectPollVoteCache(query.data);
@@ -62,14 +39,16 @@ export const useGetPollQuery = (_author?: string, _permlink?: string, metadata?:
 };
 
 export function useVotePollMutation(poll: Poll | null) {
-  // const { activeUser } = useMappedStore();
   const intl = useIntl();
   const dispatch = useDispatch();
   const queryClient = useQueryClient();
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
+  const currentAccount = useAppSelector(selectCurrentAccount);
   const pollVotesCollection = useAppSelector((state) => state.cache.pollVotesCollection);
-  const pinHash = useAppSelector((state) => state.application.pin);
-  const globalProps = useAppSelector((state) => state.account.globalProps);
+  const globalProps = useAppSelector(selectGlobalProps);
+  const authContext = useAuthContext();
+  const username = currentAccount?.name;
+
+  const broadcastMutation = usePollVote(username, authContext);
 
   return useMutation({
     mutationKey: [QUERIES.POST.SIGN_POLL_VOTE, poll?.author, poll?.permlink],
@@ -85,10 +64,11 @@ export function useVotePollMutation(poll: Poll | null) {
       if (!(choices instanceof Array)) {
         throw new Error('Invalid vote');
       }
-      // eslint-disable-next-line no-return-await
-      return await castPollVote(poll.poll_trx_id, choices, currentAccount, pinHash);
+
+      await broadcastMutation.mutateAsync({ pollTrxId: poll.poll_trx_id, choices });
+      return true;
     },
-    retry: 3,
+    retry: false,
     onMutate: ({ choices }) => {
       // update redux
       const userHp =
@@ -100,22 +80,24 @@ export function useVotePollMutation(poll: Poll | null) {
       const vote = {
         choices,
         userHp,
-        username: currentAccount.username,
+        username: currentAccount.name,
         votedAt: curTime,
         expiresAt: curTime + 120000,
         status: CacheStatus.PENDING,
       } as PollVoteCache;
       dispatch(updatePollVoteCache(postPath, vote));
+      return { postPath, voteCache: vote };
     },
 
-    onSuccess: (status) => {
+    onSuccess: (status, _vars, context) => {
       console.log('vote response', status);
-      // update poll cache here
-      const postPath = `${poll?.author || ''}/${poll?.permlink || ''}`;
-      const voteCache: PollVoteCache = pollVotesCollection[postPath];
-      if (voteCache) {
-        voteCache.status = status ? CacheStatus.PUBLISHED : CacheStatus.FAILED;
-        dispatch(updatePollVoteCache(postPath, voteCache));
+      if (context?.postPath && context?.voteCache) {
+        dispatch(
+          updatePollVoteCache(context.postPath, {
+            ...context.voteCache,
+            status: status ? CacheStatus.PUBLISHED : CacheStatus.FAILED,
+          }),
+        );
       }
     },
     onError: (err) => {
@@ -123,19 +105,25 @@ export function useVotePollMutation(poll: Poll | null) {
       const postPath = `${poll?.author || ''}/${poll?.permlink || ''}`;
       const voteCache: PollVoteCache = pollVotesCollection[postPath];
       if (voteCache) {
-        voteCache.status = CacheStatus.FAILED;
-        dispatch(updatePollVoteCache(postPath, voteCache));
+        dispatch(
+          updatePollVoteCache(postPath, {
+            ...voteCache,
+            status: CacheStatus.FAILED,
+          }),
+        );
       }
 
       dispatch(toastNotification(`${intl.formatMessage({ id: 'alert.fail' })}. ${err.message}`));
 
-      queryClient.invalidateQueries([QUERIES.POST.GET_POLL, poll?.author, poll?.permlink]);
+      queryClient.invalidateQueries({
+        queryKey: QueryKeys.polls.details(poll?.author ?? '', poll?.permlink ?? ''),
+      });
     },
   });
 }
 
 // used to create, update and remove poll vote entry from votes data
-const useInjectPollVoteCache = (pollData: Poll | null) => {
+const useInjectPollVoteCache = (pollData: Poll | null | undefined) => {
   const pollVotesCollection = useAppSelector((state) => state.cache.pollVotesCollection);
   const lastUpdate = useAppSelector((state) => state.cache.lastUpdate);
   const [retData, setRetData] = useState<Poll | null>(null);
@@ -145,7 +133,7 @@ const useInjectPollVoteCache = (pollData: Poll | null) => {
       const _postPath = lastUpdate.postPath;
       const _voteCache = pollVotesCollection[_postPath];
 
-      const _comparePath = (item) => _postPath === `${item.author}/${item.permlink}`;
+      const _comparePath = (item: Poll) => _postPath === `${item.author}/${item.permlink}`;
       const _pathMatched = pollData && _comparePath(pollData);
 
       // if poll available, inject cache and update state
@@ -157,7 +145,7 @@ const useInjectPollVoteCache = (pollData: Poll | null) => {
         setRetData({ ...data });
       }
     }
-  }, [pollVotesCollection]);
+  }, [pollVotesCollection, pollData, lastUpdate]);
 
   useEffect(() => {
     if (!pollData) {
@@ -170,16 +158,21 @@ const useInjectPollVoteCache = (pollData: Poll | null) => {
 
     const _cData = injectPollVoteCache(pollData, voteCache);
 
-    // check if data follows old schema, migrate if nesseary
-    if (_cData.poll_voters instanceof Array && !!_cData.poll_voters[0]?.choice_num) {
-      _cData.poll_voters = _cData.poll_voters.map((voter) => ({
-        ...voter,
-        choices: [voter.choice_num],
-      }));
+    // Migrate per-voter: arrays may mix old (choice_num) and new (choices) shapes,
+    // so checking only the first voter could leave new-shape voters with
+    // choices: [undefined].
+    if (_cData.poll_voters instanceof Array) {
+      _cData.poll_voters = _cData.poll_voters.map((voter) => {
+        const legacyChoice = (voter as any)?.choice_num;
+        if (legacyChoice !== undefined && legacyChoice !== null) {
+          return { ...voter, choices: [legacyChoice] };
+        }
+        return voter;
+      });
     }
 
     setRetData(_cData);
-  }, [pollData]);
+  }, [pollData, pollVotesCollection]);
 
   return retData || pollData;
 };
@@ -200,7 +193,7 @@ const injectPollVoteCache = (data: Poll, voteCache: PollVoteCache) => {
   const previousUserChoices = data.poll_choices?.filter((pc) =>
     existingVote?.choices.includes(pc.choice_num),
   );
-  // eslint-disable-next-line @typescript-eslint/no-non-null-asserted-optional-chain
+
   const selectedChoices = data.poll_choices.filter((pc) => choices.includes(pc.choice_num))!;
 
   // filtered list to separate untoched multiple choice e.g from old [1,2,3] new [3,4,5], removed would be [1, 2] , new would be [4, 5]

@@ -9,7 +9,7 @@ import {
   Draft,
   Accouncement,
   PollDraft,
-  AssetsPortfolio,
+  PortfolioItem,
 } from './ecency.types';
 
 export const convertReferral = (rawData: any) => {
@@ -85,6 +85,13 @@ export const convertDraft = (rawData: any) => {
 };
 
 export const convertLatestQuotes = (rawData: any, currencyRate: number) => {
+  // Defensive guard: a null/partial market payload previously crashed here with
+  // "Cannot read property 'quotes' of null". Throw (don't return null) so the
+  // caller's existing try/catch keeps the prior quotes instead of spreading
+  // `{...null}` === `{}` and wiping the store.
+  if (!rawData?.hive?.quotes || !rawData?.hbd?.quotes || !rawData?.estm?.quotes) {
+    throw new Error('Invalid currency rate payload: missing quotes');
+  }
   return {
     [ASSET_IDS.HIVE]: convertQuoteItem(rawData.hive.quotes.usd, currencyRate),
     [ASSET_IDS.HP]: convertQuoteItem(rawData.hive.quotes.usd, currencyRate),
@@ -94,9 +101,11 @@ export const convertLatestQuotes = (rawData: any, currencyRate: number) => {
 };
 
 export const convertCommentHistory = (rawData: any) => {
+  const rawTags = rawData?.tags;
+  const tags = Array.isArray(rawTags) ? rawTags : rawTags ? [rawTags] : [];
   return {
     body: rawData.body || '',
-    tags: rawData.tags || '',
+    tags,
     timestamp: rawData.timestamp || '',
     title: rawData.title || '',
     v: rawData.v || 1,
@@ -116,24 +125,33 @@ export const convertAnnouncement = (rawData: any) => {
 };
 
 export const convertPortfolio = (rawData: any) => {
-  if (
-    !rawData ||
-    !rawData.marketData ||
-    !rawData.globalProps ||
-    !rawData.accountData ||
-    !rawData.pointsData
-  ) {
-    return null;
+  if (!rawData || !Array.isArray(rawData)) {
+    return [];
   }
 
-  return {
-    globalProps: rawData.globalProps,
-    marketData: rawData.marketData,
-    accountData: rawData.accountData,
-    pointsData: rawData.pointsData,
-    engineData: rawData.engineData,
-    spkData: rawData.spkData,
-  } as AssetsPortfolio;
+  return rawData.map((item: any) => {
+    return {
+      name: item.name || '',
+      symbol: item.symbol || '',
+      layer: item.layer || '',
+      balance: item.balance || 0,
+      fiatRate: item.fiatRate || 0,
+      precision: item.precision ?? 3, // SDK guarantees precision, default to 3 as fallback
+      address: item.address,
+      pendingRewards: item.pendingRewards || 0,
+      pendingRewardsFiat: item.pendingRewardsFiat || 0,
+      liquid: item.symbol === 'HP' ? 0 : item.liquid,
+      liquidFiat: item.liquidFiat || 0,
+      savings: item.savings || 0,
+      savingsFiat: item.savingsFiat || 0,
+      staked: item.staked || 0,
+      stakedFiat: item.stakedFiat || 0,
+      iconUrl: item.iconUrl,
+      actions: item.actions.map((action: any) => action.id) || [],
+      extraData: item.extraData || [],
+      apr: Number(item.apr) || 0,
+    } as PortfolioItem;
+  });
 };
 
 export const convertProposalMeta = (rawData: any) => {

@@ -1,22 +1,36 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { View, StyleSheet, ActivityIndicator, useWindowDimensions } from 'react-native';
+import {
+  View,
+  StyleSheet,
+  ActivityIndicator,
+  useWindowDimensions,
+  Alert,
+  Image as RNImage,
+} from 'react-native';
 
 import WebView from 'react-native-webview';
 import YoutubeIframe, { InitialPlayerParams } from 'react-native-youtube-iframe';
 import Video from 'react-native-video';
 import MediaControls, { PLAYER_STATES } from 'react-native-media-controls';
 import Orientation from 'react-native-orientation-locker';
-import { useSelector } from 'react-redux';
 import { orientations } from '../../redux/constants/orientationsConstants';
+import { useAppSelector } from '../../hooks';
+import {
+  THREE_SPEAK_MOBILE_LAYOUT_RATIO,
+  isThreeSpeakUrl,
+  withThreeSpeakMobileLayout,
+} from '../../providers/speak/embed';
 
 interface VideoPlayerProps {
   mode: 'uri' | 'youtube';
   contentWidth?: number;
-  youtubeVideoId?: string;
+  youtubeVideoId?: string | null;
   startTime?: number;
-  uri?: string;
+  uri?: string | null;
   // prop for youtube player
   disableAutoplay?: boolean;
+  // thumbnail URL used to detect portrait video orientation
+  thumbnailUrl?: string;
 }
 
 const VideoPlayer = ({
@@ -26,9 +40,11 @@ const VideoPlayer = ({
   contentWidth,
   mode,
   disableAutoplay,
+  thumbnailUrl,
 }: VideoPlayerProps) => {
   const dim = useWindowDimensions();
-  const videoPlayer = useRef(null);
+  const videoPlayer = useRef<any>(null);
+  const fullscreenTimeoutRef = useRef<any>(null);
 
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -37,11 +53,48 @@ const VideoPlayer = ({
   const [paused, setPaused] = useState(true);
   const [playerState, setPlayerState] = useState(PLAYER_STATES.PAUSED);
   const [screenType, setScreenType] = useState('contain');
-  const lockedOrientation = useSelector((state) => state.ui.lockedOrientation);
+  const lockedOrientation = useAppSelector((state) => state.ui.lockedOrientation);
+  const lockedOrientationRef = useRef(lockedOrientation);
 
-  const PLAYER_HEIGHT = (contentWidth || dim.width) * (9 / 16);
+  const playerWidth = contentWidth || dim.width;
+  const [playerHeight, setPlayerHeight] = useState(playerWidth * (9 / 16));
   const checkSrcRegex = /(.*?)\.(mp4|webm|ogg)$/gi;
-  const isExtensionType = mode === 'uri' ? uri.match(checkSrcRegex) : false;
+  const playerUri = mode === 'uri' ? withThreeSpeakMobileLayout(uri) : uri || '';
+  const isExtensionType = mode === 'uri' && playerUri ? playerUri.match(checkSrcRegex) : false;
+  const isThreeSpeakUri = mode === 'uri' && isThreeSpeakUrl(playerUri);
+
+  // Reset height when URI changes; detect portrait from thumbnail if available.
+  // 3Speak's mobile layout is documented as 3:4, so use that instead of
+  // inferring orientation from thumbnails which may be cropped.
+  useEffect(() => {
+    let isActive = true;
+    const defaultRatio = isThreeSpeakUri ? THREE_SPEAK_MOBILE_LAYOUT_RATIO : 9 / 16;
+    setPlayerHeight(playerWidth * defaultRatio);
+
+    if (!isThreeSpeakUri && thumbnailUrl) {
+      // Load the thumbnail to detect portrait/square orientation
+      RNImage.getSize(
+        thumbnailUrl,
+        (w: number, h: number) => {
+          if (!isActive) return;
+          if (w > 0 && h > 0) {
+            const ratio = h / w;
+            if (ratio > 1.05) {
+              // Portrait video — allow up to 16:9 portrait (9:16 → ratio 16/9)
+              const cappedRatio = Math.min(ratio, 16 / 9);
+              setPlayerHeight(playerWidth * cappedRatio);
+            }
+          }
+        },
+        () => {
+          // Ignore thumbnail load errors
+        },
+      );
+    }
+    return () => {
+      isActive = false;
+    };
+  }, [playerUri, playerWidth, thumbnailUrl, isThreeSpeakUri]);
 
   useEffect(() => {
     if (isFullScreen) {
@@ -49,12 +102,30 @@ const VideoPlayer = ({
     } else {
       // handle landscape/portrait lock according to initial lock setting
       if (lockedOrientation === orientations.LANDSCAPE) {
-        !Orientation.isLocked() && Orientation.lockToLandscape();
+        Orientation.lockToLandscape();
       } else {
-        !Orientation.isLocked() && Orientation.lockToPortrait();
+        Orientation.lockToPortrait();
       }
     }
-  }, [isFullScreen]);
+  }, [isFullScreen, lockedOrientation]);
+
+  useEffect(() => {
+    lockedOrientationRef.current = lockedOrientation;
+  }, [lockedOrientation]);
+
+  useEffect(() => {
+    return () => {
+      if (fullscreenTimeoutRef.current) {
+        clearTimeout(fullscreenTimeoutRef.current);
+        fullscreenTimeoutRef.current = null;
+      }
+      if (lockedOrientationRef.current === orientations.LANDSCAPE) {
+        Orientation.lockToLandscape();
+      } else {
+        Orientation.lockToPortrait();
+      }
+    };
+  }, []);
 
   // react-native-youtube-iframe handlers
   const [shouldPlay, setShouldPlay] = useState(false);
@@ -79,11 +150,11 @@ const VideoPlayer = ({
   };
 
   // react-native-video player handlers
-  const onSeek = (seek) => {
+  const onSeek = (seek: any) => {
     videoPlayer.current.seek(seek);
   };
 
-  const onPaused = (playerState) => {
+  const onPaused = (playerState: any) => {
     setPaused(!paused);
     setPlayerState(playerState);
   };
@@ -93,13 +164,13 @@ const VideoPlayer = ({
     videoPlayer.current.seek(0);
   };
 
-  const onProgress = (data) => {
+  const onProgress = (data: any) => {
     if (!isLoading && playerState !== PLAYER_STATES.ENDED) {
       setCurrentTime(data.currentTime);
     }
   };
 
-  const onLoad = (data) => {
+  const onLoad = (data: any) => {
     setDuration(data.duration);
     videoPlayer.current.seek(0);
     setIsLoading(false);
@@ -109,10 +180,25 @@ const VideoPlayer = ({
 
   const onEnd = () => setPlayerState(PLAYER_STATES.ENDED);
 
-  const onError = () => alert('Error while playing');
+  const onError = () => Alert.alert('Error while playing');
 
   const exitFullScreen = () => {
     setIsFullScreen(false);
+    setScreenType('contain');
+    // Clear any pending timeout before scheduling a new one
+    if (fullscreenTimeoutRef.current) {
+      clearTimeout(fullscreenTimeoutRef.current);
+      fullscreenTimeoutRef.current = null;
+    }
+    // Small delay to let native fullscreen dismissal complete before locking orientation
+    fullscreenTimeoutRef.current = setTimeout(() => {
+      fullscreenTimeoutRef.current = null;
+      if (lockedOrientation === orientations.LANDSCAPE) {
+        Orientation.lockToLandscape();
+      } else {
+        Orientation.lockToPortrait();
+      }
+    }, 300);
   };
 
   const enterFullScreen = () => {
@@ -125,14 +211,14 @@ const VideoPlayer = ({
     else setScreenType('contain');
   };
 
-  const onSeeking = (currentTime) => setCurrentTime(currentTime);
+  const onSeeking = (currentTime: any) => setCurrentTime(currentTime);
 
   const _renderVideoplayerWithControls = () => {
     return (
       <View style={{ flex: 1 }}>
         <Video
           source={{
-            uri,
+            uri: playerUri,
           }}
           onEnd={onEnd}
           onLoad={onLoad}
@@ -141,7 +227,7 @@ const VideoPlayer = ({
           onError={onError}
           paused={paused}
           ref={videoPlayer}
-          resizeMode="cover"
+          resizeMode={screenType as any}
           fullscreen={isFullScreen}
           style={styles.mediaPlayer}
           volume={10}
@@ -149,6 +235,7 @@ const VideoPlayer = ({
           onFullscreenPlayerDidDismiss={exitFullScreen}
         />
         <MediaControls
+          {...({} as any)}
           duration={duration}
           isLoading={isLoading}
           mainColor="#3c4449"
@@ -167,55 +254,79 @@ const VideoPlayer = ({
     );
   };
 
-  const htmlIframeVideoPlayer = (uri) =>
-    `
-      <!DOCTYPE html>
-        <html>
-          <head>
-            <meta name="viewport" content="width=device-width,height=device-height,initial-scale=1.0" />
-              <style>
-                * {
-                    padding: 0;
-                    margin: 0;
-                    box-sizing: border-box;
-                  }
-                #iframeWrapper {
-                    position: absolute;
-                    top: 0;
-                    left: 0;
-                    right: 0;
-                    bottom: 0;
-                    height: 100%;
-                  }
-                </style>
-            </head> 
-            <body>
-              <div id="iframeWrapper">
-                <iframe width="100%" height="100%" src="${uri}" frameborder="0"  allowfullscreen>
-                </iframe>
-                </div>
-          </body>
-        </html>
-                `;
+  // Escape URI for safe HTML attribute interpolation
+  const _sanitizeUri = (raw: string) =>
+    raw.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const _getBaseUrl = (raw: string) => raw.match(/^https?:\/\/[^/?#]+/i)?.[0];
+
+  const htmlIframeVideoPlayer = (_uri: string) =>
+    `<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0" />
+  <style>
+    * { padding: 0; margin: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #000; }
+    iframe {
+      border: 0;
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+  </style>
+</head>
+<body>
+  <iframe src="${_sanitizeUri(_uri)}"
+    allow="autoplay; accelerometer; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+    allowfullscreen></iframe>
+  <script>
+    window.addEventListener('message', function(e) {
+      if (e.data && e.data.type === '3speak-player-ready' && window.ReactNativeWebView) {
+        var msg = { type: 'aspectRatio' };
+        if (e.data.isVertical) {
+          msg.ratio = 16 / 9;
+        } else if (e.data.aspectRatio && Math.abs(e.data.aspectRatio - 1) < 0.1) {
+          msg.ratio = 1;
+        }
+        if (msg.ratio) {
+          window.ReactNativeWebView.postMessage(JSON.stringify(msg));
+        }
+      }
+    });
+  </script>
+</body>
+</html>`;
   return (
     <View style={styles.container}>
       {mode === 'youtube' && youtubeVideoId && (
-        <View style={{ width: contentWidth, height: PLAYER_HEIGHT }}>
+        <View style={{ width: playerWidth, height: playerHeight }}>
           <YoutubeIframe
-            height={PLAYER_HEIGHT}
+            height={playerHeight}
             videoId={youtubeVideoId}
             initialPlayerParams={initialParams}
             onReady={_onReady}
             play={shouldPlay}
             onChangeState={_onChangeState}
             onError={_onError}
-            onFullScreenChange={(status) => setIsFullScreen(status)}
+            onFullScreenChange={(status: any) => {
+              setIsFullScreen(status);
+              if (!status) {
+                if (lockedOrientation === orientations.LANDSCAPE) {
+                  Orientation.lockToLandscape();
+                } else {
+                  Orientation.lockToPortrait();
+                }
+              }
+            }}
             webViewProps={{ mediaPlaybackRequiresUserAction: true }}
           />
         </View>
       )}
       {mode === 'uri' && uri && (
-        <View style={[styles.playerWrapper, { height: PLAYER_HEIGHT }]}>
+        <View style={[styles.playerWrapper, { height: playerHeight }]}>
           {isExtensionType ? (
             _renderVideoplayerWithControls()
           ) : (
@@ -230,16 +341,35 @@ const VideoPlayer = ({
               onLoadStart={() => {
                 setIsLoading(true);
               }}
-              source={{ html: htmlIframeVideoPlayer(uri) }}
-              style={[styles.barkBackground, { width: contentWidth, height: PLAYER_HEIGHT }]}
+              source={
+                isThreeSpeakUri
+                  ? { uri: playerUri }
+                  : { html: htmlIframeVideoPlayer(playerUri), baseUrl: _getBaseUrl(playerUri) }
+              }
+              style={[styles.barkBackground, { width: playerWidth, height: playerHeight }]}
               startInLoadingState={true}
               onShouldStartLoadWithRequest={() => true}
-              mediaPlaybackRequiresUserAction={true}
+              mediaPlaybackRequiresUserAction={false}
               allowsInlineMediaPlayback={true}
               allowsFullscreenVideo={true}
+              allowsProtectedMedia={true}
+              thirdPartyCookiesEnabled={true}
+              sharedCookiesEnabled={true}
               useWebKit={true}
               domStorageEnabled
+              mixedContentMode="compatibility"
               originWhitelist={['*']}
+              onMessage={(event) => {
+                try {
+                  const msg = JSON.parse(event.nativeEvent.data);
+                  if (msg.type === 'aspectRatio' && msg.ratio) {
+                    const cappedRatio = Math.min(msg.ratio, 16 / 9);
+                    setPlayerHeight(playerWidth * cappedRatio);
+                  }
+                } catch {
+                  // ignore non-JSON messages
+                }
+              }}
             />
           )}
         </View>

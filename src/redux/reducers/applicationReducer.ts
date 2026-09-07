@@ -1,11 +1,20 @@
+import Config from 'react-native-config';
+import { encryptKey } from '../../utils/crypto';
+import { DEFAULT_IMAGE_SERVER } from '../../constants/options/imageServer';
 import {
   CHANGE_COMMENT_NOTIFICATION,
   CHANGE_FOLLOW_NOTIFICATION,
   CHANGE_MENTION_NOTIFICATION,
   CHANGE_FAVORITE_NOTIFICATION,
   CHANGE_BOOKMARK_NOTIFICATION,
+  CHANGE_TAGS_NOTIFICATION,
   CHANGE_REBLOG_NOTIFICATION,
   CHANGE_TRANSFERS_NOTIFICATION,
+  CHANGE_SCHEDULED_PUBLISHED_NOTIFICATION,
+  CHANGE_DELEGATIONS_NOTIFICATION,
+  CHANGE_PAYOUTS_NOTIFICATION,
+  CHANGE_ACCOUNT_UPDATE_NOTIFICATION,
+  CHANGE_WEEKLY_EARNINGS_NOTIFICATION,
   CHANGE_VOTE_NOTIFICATION,
   CHANGE_ALL_NOTIFICATION_SETTINGS,
   IS_CONNECTED,
@@ -13,6 +22,7 @@ import {
   IS_DEFAULT_FOOTER,
   IS_LOGIN_DONE,
   IS_NOTIFICATION_OPEN,
+  SET_FCM_AVAILABLE,
   LOGIN,
   SET_API,
   SET_CURRENCY,
@@ -31,7 +41,17 @@ import {
   SET_IS_BIOMETRIC_ENABLED,
   SET_ENC_UNLOCK_PIN,
   SET_WAVE_UPVOTE_PERCENT,
+  SET_IMAGE_SERVER,
+  UPDATE_APP_RATING_META,
 } from '../constants/constants';
+
+// Tracks app usage so the in-app store-review prompt can be gated to engaged
+// users (see redux/actions/applicationActions maybeRequestReview).
+interface AppRatingMeta {
+  firstUseTime: number | null; // epoch ms of first recorded session
+  sessionCount: number; // number of app opens / foregrounds recorded
+  hasRequestedReview: boolean; // native review prompt already requested once
+}
 
 interface State {
   api: string;
@@ -48,6 +68,7 @@ interface State {
   isLoginDone: boolean;
   isLogingOut: boolean;
   isNotificationOpen: boolean;
+  isFCMAvailable: boolean | null; // FCM (Firebase Cloud Messaging) availability - null means not checked yet
   language: string;
   loading: boolean; // It is lock to all screen and shows loading animation.
   notificationDetails: {
@@ -55,9 +76,16 @@ interface State {
     followNotification: boolean;
     mentionNotification: boolean;
     favoriteNotification: boolean;
+    bookmarkNotification: boolean;
+    tagsNotification: boolean;
     reblogNotification: boolean;
     transfersNotification: boolean;
     voteNotification: boolean;
+    scheduledPublishedNotification: boolean;
+    delegationsNotification: boolean;
+    payoutsNotification: boolean;
+    accountUpdateNotification: boolean;
+    weeklyEarningsNotification: boolean;
   };
   postUpvotePercent: number;
   commentUpvotePercent: number;
@@ -72,6 +100,8 @@ interface State {
   hidePostsThumbnails: boolean;
   isTermsAccepted: boolean;
   isBiometricEnabled: boolean;
+  imageServer: string;
+  appRating: AppRatingMeta;
 }
 
 const initialState: State = {
@@ -89,6 +119,7 @@ const initialState: State = {
   isLoginDone: false,
   isLogingOut: false,
   isNotificationOpen: true,
+  isFCMAvailable: null, // Not checked yet
   language: 'en-US',
   loading: false, // It is lock to all screen and shows loading animation.
   notificationDetails: {
@@ -96,15 +127,22 @@ const initialState: State = {
     followNotification: true,
     mentionNotification: true,
     favoriteNotification: true,
+    bookmarkNotification: true,
+    tagsNotification: true,
     reblogNotification: true,
     transfersNotification: true,
     voteNotification: true,
+    scheduledPublishedNotification: true,
+    delegationsNotification: true,
+    payoutsNotification: true,
+    accountUpdateNotification: true,
+    weeklyEarningsNotification: true,
   },
   postUpvotePercent: 1,
   commentUpvotePercent: 1,
   waveUpvotePercent: 1,
   nsfw: '1',
-  pin: null,
+  pin: encryptKey(Config.DEFAULT_PIN!, Config.PIN_KEY!),
   isPinCodeOpen: false,
   isRenderRequired: false,
   encUnlockPin: '',
@@ -113,9 +151,15 @@ const initialState: State = {
   hidePostsThumbnails: false,
   isTermsAccepted: false,
   isBiometricEnabled: false,
+  imageServer: DEFAULT_IMAGE_SERVER,
+  appRating: {
+    firstUseTime: null,
+    sessionCount: 0,
+    hasRequestedReview: false,
+  },
 };
 
-const applicationReducer = (state = initialState, action): State => {
+const applicationReducer = (state = initialState, action: any): State => {
   switch (action.type) {
     case LOGIN:
       return {
@@ -148,6 +192,10 @@ const applicationReducer = (state = initialState, action): State => {
     case IS_NOTIFICATION_OPEN:
       return Object.assign({}, state, {
         isNotificationOpen: action.payload,
+      });
+    case SET_FCM_AVAILABLE:
+      return Object.assign({}, state, {
+        isFCMAvailable: action.payload,
       });
     case CHANGE_COMMENT_NOTIFICATION:
       return Object.assign({}, state, {
@@ -184,6 +232,13 @@ const applicationReducer = (state = initialState, action): State => {
           bookmarkNotification: action.payload,
         },
       });
+    case CHANGE_TAGS_NOTIFICATION:
+      return Object.assign({}, state, {
+        notificationDetails: {
+          ...state.notificationDetails,
+          tagsNotification: action.payload,
+        },
+      });
     case CHANGE_REBLOG_NOTIFICATION:
       return Object.assign({}, state, {
         notificationDetails: {
@@ -196,6 +251,41 @@ const applicationReducer = (state = initialState, action): State => {
         notificationDetails: {
           ...state.notificationDetails,
           transfersNotification: action.payload,
+        },
+      });
+    case CHANGE_SCHEDULED_PUBLISHED_NOTIFICATION:
+      return Object.assign({}, state, {
+        notificationDetails: {
+          ...state.notificationDetails,
+          scheduledPublishedNotification: action.payload,
+        },
+      });
+    case CHANGE_DELEGATIONS_NOTIFICATION:
+      return Object.assign({}, state, {
+        notificationDetails: {
+          ...state.notificationDetails,
+          delegationsNotification: action.payload,
+        },
+      });
+    case CHANGE_PAYOUTS_NOTIFICATION:
+      return Object.assign({}, state, {
+        notificationDetails: {
+          ...state.notificationDetails,
+          payoutsNotification: action.payload,
+        },
+      });
+    case CHANGE_ACCOUNT_UPDATE_NOTIFICATION:
+      return Object.assign({}, state, {
+        notificationDetails: {
+          ...state.notificationDetails,
+          accountUpdateNotification: action.payload,
+        },
+      });
+    case CHANGE_WEEKLY_EARNINGS_NOTIFICATION:
+      return Object.assign({}, state, {
+        notificationDetails: {
+          ...state.notificationDetails,
+          weeklyEarningsNotification: action.payload,
         },
       });
     case CHANGE_VOTE_NOTIFICATION:
@@ -212,11 +302,20 @@ const applicationReducer = (state = initialState, action): State => {
           ...state.notificationDetails,
           mentionNotification: action.payload.mentionNotification,
           favoriteNotification: action.payload.favoriteNotification,
+          // bookmark and scheduledPublished may be missing from legacy settings
+          // payloads (realm migration predates them), keep current value then
+          bookmarkNotification:
+            action.payload.bookmarkNotification ?? state.notificationDetails.bookmarkNotification,
+          tagsNotification:
+            action.payload.tagsNotification ?? state.notificationDetails.tagsNotification,
           reblogNotification: action.payload.reblogNotification,
           transfersNotification: action.payload.transfersNotification,
           voteNotification: action.payload.voteNotification,
           followNotification: action.payload.followNotification,
           commentNotification: action.payload.commentNotification,
+          scheduledPublishedNotification:
+            action.payload.scheduledPublishedNotification ??
+            state.notificationDetails.scheduledPublishedNotification,
         },
       });
     case IS_DARK_THEME:
@@ -297,6 +396,21 @@ const applicationReducer = (state = initialState, action): State => {
       return {
         ...state,
         encUnlockPin: action.payload,
+      };
+
+    case SET_IMAGE_SERVER:
+      return {
+        ...state,
+        imageServer: action.payload,
+      };
+
+    case UPDATE_APP_RATING_META:
+      return {
+        ...state,
+        appRating: {
+          ...state.appRating,
+          ...action.payload,
+        },
       };
     default:
       return state;

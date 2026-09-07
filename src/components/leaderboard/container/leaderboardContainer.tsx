@@ -1,16 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 
 // Constants
 import { useDispatch } from 'react-redux';
-import { useQueryClient } from '@tanstack/react-query';
 import { useIntl } from 'react-intl';
+import { SheetManager } from 'react-native-actions-sheet';
 import FILTER_OPTIONS from '../../../constants/options/leaderboard';
 
 // Component
 import LeaderboardView from '../view/leaderboardView';
-import { showProfileModal, toastNotification } from '../../../redux/actions/uiAction';
+import { toastNotification } from '../../../redux/actions/uiAction';
 import { leaderboardQuries } from '../../../providers/queries';
-import QUERIES from '../../../providers/queries/queryKeys';
+import { SheetNames } from '../../../navigation/sheets';
 
 /*
  *            Props Name        Description                                     Value
@@ -21,42 +21,56 @@ import QUERIES from '../../../providers/queries/queryKeys';
 const LeaderboardContainer = () => {
   const intl = useIntl();
   const dispatch = useDispatch();
-  const queryClient = useQueryClient();
 
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [duration, setDuration] = useState(FILTER_OPTIONS[selectedIndex]);
-  const [refreshing, setRefreshing] = useState(false);
 
   const leaderboardQuery = leaderboardQuries.useGetLeaderboardQuery(duration);
 
-  // update failure handler
-  useEffect(() => {
-    if (!leaderboardQuery.isFetching) {
-      setRefreshing(false);
-      if (leaderboardQuery.error) {
-        dispatch(
-          toastNotification(
-            intl.formatMessage(
-              { id: 'alert.something_wrong_msg' },
-              { message: leaderboardQuery.error.message },
-            ),
-          ),
-        );
-      }
+  // On the daily board, float users who completed their quests to the top so
+  // they're more visible. Stable partition — relative (point) order within each
+  // group is preserved. quests_done only exists on the daily duration, so the
+  // weekly/monthly boards stay in their original ranking.
+  const users = useMemo(() => {
+    const { data } = leaderboardQuery;
+    if (selectedIndex !== 0 || !Array.isArray(data)) {
+      return data;
     }
-  }, [leaderboardQuery.error, leaderboardQuery.isFetching]);
+    const done: any[] = [];
+    const rest: any[] = [];
+    data.forEach((item) => (item?.quests_done ? done : rest).push(item));
+    return [...done, ...rest];
+  }, [leaderboardQuery.data, selectedIndex]);
 
-  const _handleOnUserPress = (username) => {
-    dispatch(showProfileModal(username));
+  // surface fetch errors as a toast
+  useEffect(() => {
+    if (!leaderboardQuery.isFetching && leaderboardQuery.error) {
+      dispatch(
+        toastNotification(
+          intl.formatMessage(
+            { id: 'alert.something_wrong_msg' },
+            { message: leaderboardQuery.error.message },
+          ),
+        ),
+      );
+    }
+  }, [leaderboardQuery.error, leaderboardQuery.isFetching, dispatch, intl]);
+
+  const _handleOnUserPress = (username: any) => {
+    SheetManager.show(SheetNames.QUICK_PROFILE, {
+      payload: {
+        username,
+      },
+    });
   };
 
-  const _fetchLeaderBoard = async (selectedFilter, index) => {
-    // condition for detecting refresh
+  const _fetchLeaderBoard = (selectedFilter: any, index: any) => {
+    // pull-to-refresh: no args → refetch the active query directly so its
+    // isFetching cycle drives the spinner. The previous code invalidated a
+    // mismatched key so isFetching never flipped and the spinner stuck.
     if (index === undefined || !selectedFilter) {
-      index = selectedIndex;
-      selectedFilter = FILTER_OPTIONS[index];
-      queryClient.invalidateQueries([QUERIES.LEADERBOARD.GET, selectedFilter]);
-      setRefreshing(true);
+      leaderboardQuery.refetch();
+      return;
     }
 
     // tab change state update
@@ -66,8 +80,8 @@ const LeaderboardContainer = () => {
 
   return (
     <LeaderboardView
-      users={leaderboardQuery.data}
-      refreshing={leaderboardQuery.isLoading || refreshing}
+      users={users}
+      refreshing={leaderboardQuery.isFetching}
       fetchLeaderBoard={_fetchLeaderBoard}
       handleOnUserPress={_handleOnUserPress}
       selectedIndex={selectedIndex}

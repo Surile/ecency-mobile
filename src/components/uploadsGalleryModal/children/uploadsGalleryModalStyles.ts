@@ -30,7 +30,7 @@ export default EStyleSheet.create({
     height: THUMB_SIZE,
     width: THUMB_SIZE,
     borderRadius: 16,
-    backgroundColor: '$primaryLightGray',
+    backgroundColor: '$primaryLightBackground',
   } as ImageStyle,
 
   gridMediaItem: {
@@ -39,7 +39,7 @@ export default EStyleSheet.create({
     width: GRID_THUMB_SIZE,
     marginVertical: 8,
     borderRadius: 16,
-    backgroundColor: '$primaryLightGray',
+    backgroundColor: '$primaryLightBackground',
   } as ImageStyle,
 
   inputContainer: {
@@ -250,4 +250,19 @@ export default EStyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   } as ViewStyle,
+
+  gifBadge: {
+    position: 'absolute',
+    left: 10,
+    bottom: 10,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+  } as ViewStyle,
+  gifBadgeText: {
+    color: '$pureWhite',
+    fontSize: 12,
+    fontWeight: 'bold',
+  } as TextStyle,
 });

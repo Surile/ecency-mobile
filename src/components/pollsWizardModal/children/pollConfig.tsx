@@ -1,8 +1,8 @@
-import React, { forwardRef, useImperativeHandle, useRef } from 'react';
-import { Text, View } from 'react-native';
+import React, { useRef } from 'react';
+import { Text, Platform } from 'react-native';
 import { useIntl } from 'react-intl';
-import ActionSheet from 'react-native-actions-sheet';
-import styles from '../styles/pollConfig.styles';
+import Animated, { SlideInDown, SlideOutDown } from 'react-native-reanimated';
+import styles from '../styles/pollsWizardContent.styles';
 import { FormInput } from '../../formInput';
 import SettingsItem from '../../settingsItem';
 import { PollPreferredInterpretation } from '../../../providers/hive/hive.types';
@@ -10,74 +10,92 @@ import { PollDraft } from '../../../providers/ecency/ecency.types';
 
 interface Props {
   pollDraft: PollDraft;
-  setPollDraft: (meta: PollDraft) => void;
+  setPollDraft: (meta: PollDraft | ((draft: PollDraft) => PollDraft)) => void;
 }
 
-export const PollConfig = forwardRef(({ pollDraft, setPollDraft }: Props, ref) => {
+export const PollConfig = ({ pollDraft, setPollDraft }: Props) => {
   const intl = useIntl();
-  const sheetModalRef = useRef(null);
-
   const _interpretations = Object.values(PollPreferredInterpretation);
+  const ageInputRef = useRef<any>(null);
+  const maxOptionsInputRef = useRef<any>(null);
 
-  useImperativeHandle(ref, () => ({
-    showConfig: () => {
-      sheetModalRef.current?.show();
-    },
-  }));
-
-  const _onAgeLimitChange = (text) => {
+  const _onAgeLimitChange = (text: any) => {
     const val = parseInt(text);
     if (val >= 0) {
-      setPollDraft({
-        ...pollDraft,
+      const sanitized = `${val}`;
+      if (sanitized !== text) {
+        ageInputRef.current?.setText(sanitized);
+      }
+      setPollDraft((prev) => ({
+        ...prev,
         filters: {
           accountAge: val,
         },
-      });
+      }));
+    } else {
+      // Reject non-numeric or negative input by re-feeding last known good value
+      ageInputRef.current?.setText(`${pollDraft.filters?.accountAge ?? ''}`);
     }
   };
 
-  const _onMaxOptionsChange = (text) => {
+  const _onMaxOptionsChange = (text: any) => {
     const val = parseInt(text);
     if (val >= 0) {
-      setPollDraft({
-        ...pollDraft,
+      const sanitized = `${val}`;
+      if (sanitized !== text) {
+        maxOptionsInputRef.current?.setText(sanitized);
+      }
+      setPollDraft((prev) => ({
+        ...prev,
         maxChoicesVoted: val,
-      });
+      }));
+    } else {
+      maxOptionsInputRef.current?.setText(`${pollDraft.maxChoicesVoted ?? ''}`);
     }
   };
 
   const _onInterpretationChange = (index: number) => {
     const interpretation = _interpretations[index];
-    setPollDraft({
-      ...pollDraft,
+
+    // TODO: handle token selection later
+    const token = interpretation === PollPreferredInterpretation.TOKENS ? 'HIVE:HP' : undefined;
+
+    setPollDraft((prev) => ({
+      ...prev,
       interpretation,
-    });
+      token,
+    }));
   };
 
   const _onShowVotesChange = (val: boolean) => {
-    setPollDraft({
-      ...pollDraft,
+    setPollDraft((prev) => ({
+      ...prev,
       hideVotes: !val,
-    });
+    }));
   };
 
   const _onVoteChangeUpdate = (val: boolean) => {
-    setPollDraft({
-      ...pollDraft,
+    setPollDraft((prev) => ({
+      ...prev,
       voteChange: val,
-    });
+    }));
   };
 
-  const _renderFormContent = (
-    <View style={styles.optionsContainer}>
-      {/* <BasicHeader
-                handleOnBackPress={() => { setVisible(false) }}
-                title={"Edit Configuration"}
-            /> */}
-      {/* <KeyboardAwareScrollView contentContainerStyle={{ paddingHorizontal: 16 }}> */}
-      <Text style={styles.label}>Min. Account Age (Days)</Text>
+  const _onHideResultsChange = (val: boolean) => {
+    setPollDraft((prev) => ({
+      ...prev,
+      hideResults: val,
+    }));
+  };
+
+  return (
+    <Animated.View
+      entering={Platform.OS === 'ios' ? SlideInDown : undefined}
+      exiting={Platform.OS === 'ios' ? SlideOutDown : undefined}
+    >
+      <Text style={styles.label}>{intl.formatMessage({ id: 'post_poll.config_age' })}</Text>
       <FormInput
+        ref={ageInputRef}
         rightIconName="calendar"
         iconType="MaterialCommunityIcons"
         isValid={true}
@@ -90,8 +108,10 @@ export const PollConfig = forwardRef(({ pollDraft, setPollDraft }: Props, ref) =
         keyboardType="numeric"
       />
 
-      <Text style={styles.label}>Max Options</Text>
+      {/** TODO: use translated text */}
+      <Text style={styles.label}>{intl.formatMessage({ id: 'post_poll.config_max_options' })}</Text>
       <FormInput
+        ref={maxOptionsInputRef}
         rightIconName="check-all"
         iconType="MaterialCommunityIcons"
         isValid={true}
@@ -105,7 +125,7 @@ export const PollConfig = forwardRef(({ pollDraft, setPollDraft }: Props, ref) =
       />
 
       <SettingsItem
-        title="Poll Interpretation"
+        title={intl.formatMessage({ id: 'post_poll.config_poll_interpretation' })}
         titleStyle={styles.settingsTitle}
         type="dropdown"
         actionType="language"
@@ -120,7 +140,18 @@ export const PollConfig = forwardRef(({ pollDraft, setPollDraft }: Props, ref) =
       />
 
       <SettingsItem
-        title="Show votes "
+        title={intl.formatMessage({ id: 'post_poll.config_hide_results' })}
+        text="show more votes"
+        type="toggle"
+        actionType="show_votes"
+        titleStyle={styles.settingsTitle}
+        wrapperStyle={styles.settingsWrapper}
+        handleOnChange={_onHideResultsChange}
+        isOn={pollDraft.hideResults}
+      />
+
+      <SettingsItem
+        title={intl.formatMessage({ id: 'post_poll.config_show_voters' })}
         text="show more votes"
         type="toggle"
         actionType="show_votes"
@@ -131,7 +162,7 @@ export const PollConfig = forwardRef(({ pollDraft, setPollDraft }: Props, ref) =
       />
 
       <SettingsItem
-        title="Vote Change"
+        title={intl.formatMessage({ id: 'post_poll.config_vote_change' })}
         text="show more votes"
         type="toggle"
         actionType="show_votes"
@@ -140,18 +171,6 @@ export const PollConfig = forwardRef(({ pollDraft, setPollDraft }: Props, ref) =
         handleOnChange={_onVoteChangeUpdate}
         isOn={pollDraft.voteChange}
       />
-    </View>
+    </Animated.View>
   );
-
-  return (
-    <ActionSheet
-      ref={sheetModalRef}
-      gestureEnabled={true}
-      closeOnTouchBackdrop={true}
-      containerStyle={styles.sheetContent}
-      indicatorStyle={styles.sheetIndicator}
-    >
-      {_renderFormContent}
-    </ActionSheet>
-  );
-});
+};

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useMemo } from 'react';
 
 import { useIntl } from 'react-intl';
 import {
@@ -12,9 +12,12 @@ import {
 } from 'react-native';
 import get from 'lodash/get';
 import EStyleSheet from 'react-native-extended-stylesheet';
-import { useDispatch } from 'react-redux';
 import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { SheetManager } from 'react-native-actions-sheet';
+// utils
+import { getReferralsInfiniteQueryOptions, getReferralsStatsQueryOptions } from '@ecency/sdk';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import {
   BasicHeader,
   Icon,
@@ -23,69 +26,44 @@ import {
   PopoverWrapper,
   UserListItem,
 } from '../../components';
-// utils
-import { getReferralsList, getReferralsStats } from '../../providers/ecency/ecency';
 import { Referral } from '../../models';
+import { convertReferral } from '../../providers/ecency/converters';
 
 // styles
 import styles from './referScreenStyles';
 
 // constants
 import ROUTES from '../../constants/routeNames';
+import TransferTypes from '../../constants/transferTypes';
+import TokenLayers from '../../constants/tokenLayers';
 
 // Redux / Services
-import { showProfileModal } from '../../redux/actions/uiAction';
 import RootNavigation from '../../navigation/rootNavigation';
 import { useAppSelector } from '../../hooks';
+import { SheetNames } from '../../navigation/sheets';
+import { selectCurrentAccount, selectIsDarkTheme } from '../../redux/selectors';
 
 const ReferScreen = () => {
   const intl = useIntl();
-  const dispatch = useDispatch();
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const isDarkTheme = useAppSelector((state) => state.application.isDarkTheme);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const isDarkTheme = useAppSelector(selectIsDarkTheme);
 
-  const [referralsList, setReferralsList] = useState<Referral[]>([]);
-  const [earnedPoints, setEarnedPoint] = useState(0);
-  const [pendingPoints, setPendingPoint] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const referralsQuery = useInfiniteQuery(getReferralsInfiniteQueryOptions(currentAccount.name));
+  const referralsStatsQuery = useQuery(getReferralsStatsQueryOptions(currentAccount.name));
 
-  useEffect(() => {
-    _getReferralsStats();
-    _getReferralsList();
-  }, []);
+  const referralsList = useMemo<Referral[]>(
+    () =>
+      referralsQuery.data?.pages?.flatMap((page) => page.map((item) => convertReferral(item))) ||
+      [],
+    [referralsQuery.data?.pages],
+  );
 
-  console.log('-----referralsList----- : ', referralsList);
-
-  const _getReferralsList = async (refresh?: boolean) => {
-    if (refresh) {
-      setRefreshing(true);
-    }
-    setLoading(true);
-
-    const lastReferralId =
-      refresh || !referralsList.length ? null : referralsList[referralsList.length - 1]._id;
-
-    const responseData = await getReferralsList(currentAccount.name, lastReferralId);
-
-    setReferralsList(refresh ? responseData : [...referralsList, ...responseData]);
-    setRefreshing(false);
-    setLoading(false);
-  };
-
-  const _getReferralsStats = async () => {
-    setLoading(true);
-
-    const referralStats = await getReferralsStats(currentAccount.name);
-    const earnedPoints = referralStats.rewarded * 100;
-    const unearnedPoints = (referralStats.total - referralStats.rewarded) * 100;
-    setEarnedPoint(earnedPoints);
-    setPendingPoint(unearnedPoints);
-    setLoading(false);
-  };
+  const earnedPoints = (referralsStatsQuery.data?.rewarded || 0) * 100;
+  const pendingPoints =
+    ((referralsStatsQuery.data?.total || 0) - (referralsStatsQuery.data?.rewarded || 0)) * 100;
 
   const _handleRefer = () => {
-    const shareUrl = `https://ecency.com/signup?referral=${currentAccount.username}`;
+    const shareUrl = `https://ecency.com/signup?referral=${currentAccount.name}`;
     Share.share({
       message: shareUrl,
     });
@@ -96,15 +74,20 @@ const ReferScreen = () => {
     RootNavigation.navigate({
       name: ROUTES.SCREENS.TRANSFER,
       params: {
-        transferType: 'delegate',
+        transferType: TransferTypes.DELEGATE_VESTING_SHARES,
         fundType: 'HIVE_POWER',
+        assetLayer: TokenLayers.HIVE,
         referredUsername: item.referredUsername,
       },
     });
   };
 
   const _handleOnItemPress = (username: string) => {
-    dispatch(showProfileModal(username));
+    SheetManager.show(SheetNames.QUICK_PROFILE, {
+      payload: {
+        username,
+      },
+    });
   };
 
   const _renderPointsEarned = () => {
@@ -183,7 +166,10 @@ const ReferScreen = () => {
     );
   };
 
-  const _renderEmptyView = loading ? (
+  const isLoading = referralsQuery.isLoading || referralsStatsQuery.isLoading;
+  const isRefreshing = referralsQuery.isRefetching;
+
+  const _renderEmptyView = isLoading ? (
     <ListPlaceHolder />
   ) : (
     <Text style={styles.emptyText}>{intl.formatMessage({ id: 'refer.empty_text' })}</Text>
@@ -191,7 +177,9 @@ const ReferScreen = () => {
 
   const _renderFooterView = (
     <View style={{ height: 72, justifyContent: 'center' }}>
-      {loading && <ActivityIndicator color={EStyleSheet.value('$primaryBlue')} />}
+      {(referralsQuery.isFetchingNextPage || isLoading) && (
+        <ActivityIndicator color={EStyleSheet.value('$primaryBlue')} />
+      )}
     </View>
   );
 
@@ -201,7 +189,7 @@ const ReferScreen = () => {
         key={get(item, '_id')}
         index={index}
         username={item.referredUsername}
-        description={get(item, 'created')}
+        description={item.timestamp instanceof Date ? item.timestamp.toLocaleDateString() : ''}
         // isClickable
         isBlackRightColor
         isLoggedIn
@@ -225,11 +213,15 @@ const ReferScreen = () => {
           contentContainerStyle={styles.listContentContainer}
           showsVerticalScrollIndicator={false}
           onEndReachedThreshold={0.3}
-          onEndReached={() => _getReferralsList()}
+          onEndReached={() => {
+            if (referralsQuery.hasNextPage && !referralsQuery.isFetchingNextPage) {
+              referralsQuery.fetchNextPage();
+            }
+          }}
           refreshControl={
             <RefreshControl
-              refreshing={refreshing}
-              onRefresh={() => _getReferralsList(true)}
+              refreshing={isRefreshing}
+              onRefresh={() => referralsQuery.refetch()}
               progressBackgroundColor="#357CE6"
               tintColor={!isDarkTheme ? '#357ce6' : '#96c0ff'}
               titleColor="#fff"

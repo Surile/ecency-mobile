@@ -11,15 +11,24 @@ import { Buffer } from 'buffer';
 import { useQueryClient } from '@tanstack/react-query';
 import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
 import { postBodySummary } from '@ecency/render-helper';
-import { addDraft, updateDraft, getDrafts, addSchedule } from '../../../providers/ecency/ecency';
-import { toastNotification, setRcOffer, showActionModal } from '../../../redux/actions/uiAction';
 import {
-  postContent,
-  getPurePost,
-  grantPostingPermission,
-  reblog,
-  postComment,
-} from '../../../providers/hive/dhive';
+  getDraftsInfiniteQueryOptions,
+  getDraftsQueryOptions,
+  getPostQueryOptions,
+  getSupportSettingsQueryOptions,
+  addDraft,
+  updateDraft,
+  enforceThreeSpeakBeneficiary,
+  type CommentPayload,
+} from '@ecency/sdk';
+import { SheetManager } from 'react-native-actions-sheet';
+import * as Sentry from '@sentry/react-native';
+import Config from 'react-native-config';
+import { toastNotification, setRcOffer } from '../../../redux/actions/uiAction';
+import { isInsufficientRcError } from '../../../utils/rcError';
+import { maybeOfferFirstPublishDigest } from '../../../utils/firstPublishDigest';
+import { getDigitPinCode, shouldPromptPostingAuthority } from '../../../providers/hive/hive';
+import { decryptKey } from '../../../utils/crypto';
 
 // Constants
 import { default as ROUTES } from '../../../constants/routeNames';
@@ -31,9 +40,12 @@ import {
   makeJsonMetadata,
   makeOptions,
   extractMetadata,
+  collectVideoThumbUrls,
+  restoreVideoThumbs,
+  VideoThumb,
   makeJsonMetadataForUpdate,
+  cleanAiTools,
   createPatch,
-  extract3SpeakIds,
 } from '../../../utils/editor';
 
 // Component
@@ -42,27 +54,46 @@ import {
   removeEditorCache,
   setAllowSpkPublishing,
   setBeneficiaries,
+  setDraftCaret,
   setPollDraftAction,
 } from '../../../redux/actions/editorActions';
+import { maybeRequestReview } from '../../../redux/actions/applicationActions';
 import { DEFAULT_USER_DRAFT_ID } from '../../../redux/constants/constants';
 import {
   deleteDraftCacheEntry,
-  updateCommentCache,
+  deleteReplyCacheEntry,
   updateDraftCache,
+  updateReplyCache,
 } from '../../../redux/actions/cacheActions';
-import QUERIES from '../../../providers/queries/queryKeys';
-import bugsnapInstance from '../../../config/bugsnag';
-import { useUserActivityMutation } from '../../../providers/queries/pointQueries';
-import { PointActivityIds } from '../../../providers/ecency/ecency.types';
 import { usePostsCachePrimer } from '../../../providers/queries/postQueries/postQueries';
+import { deriveDiscussionRoot } from '../../../utils/discussionRoot';
+import { isTemplateDraft } from '../../../utils/draftTemplates';
+import {
+  useCommentMutations,
+  addOptimisticComment,
+  removeOptimisticComment,
+} from '../../../providers/queries/postQueries/commentQueries';
+import {
+  useReblogMutation,
+  useGrantPostingPermissionMutation,
+} from '../../../providers/sdk/mutations';
+import {
+  useAddScheduleMutation,
+  useDraftDeleteMutation,
+} from '../../../providers/queries/draftQueries';
 import { PostTypes } from '../../../constants/postTypes';
 
-import { speakQueries } from '../../../providers/queries';
 import {
-  BENEFICIARY_SRC_ENCODER,
-  DEFAULT_SPEAK_BENEFICIARIES,
-} from '../../../providers/speak/constants';
-import { ThreeSpeakVideo } from '../../../providers/speak/speak.types';
+  ECENCY_SUPPORT_ACCOUNT,
+  injectEcencySupportBeneficiary,
+} from '../../../providers/ecency/supportBeneficiary';
+import { SheetNames } from '../../../navigation/sheets';
+import {
+  selectCurrentAccount,
+  selectIsLoggedIn,
+  selectPin,
+  selectIsDefaultFooter,
+} from '../../../redux/selectors';
 
 /*
  *            Props Name        Description                                     Value
@@ -70,7 +101,14 @@ import { ThreeSpeakVideo } from '../../../providers/speak/speak.types';
  *
  */
 
-class EditorContainer extends Component<EditorContainerProps, any> {
+// Publishing must never hang on the voluntary support settings lookup: the
+// SDK fetch carries no timeout of its own, so the submit-time read is raced
+// against this bound and fails open (no injection) when it loses.
+const SUPPORT_SETTINGS_FETCH_TIMEOUT_MS = 4000;
+
+class EditorContainer extends Component<any, any> {
+  stateTimer: any;
+
   _isMounted = false;
 
   _updatedDraftFields = null;
@@ -79,7 +117,15 @@ class EditorContainer extends Component<EditorContainerProps, any> {
 
   _appState = AppState.currentState;
 
-  constructor(props) {
+  _isSubmitting = false;
+
+  // Set once a post is published so the unmount/autosave draft write is skipped
+  // and can't recreate the server draft the publish flow just deleted.
+  _isPublished = false;
+
+  _postingAuthorityPromptShown = false;
+
+  constructor(props: any) {
     super(props);
     this.state = {
       autoFocusText: false,
@@ -96,10 +142,11 @@ class EditorContainer extends Component<EditorContainerProps, any> {
       post: null,
       uploadedImage: null,
       community: [],
-      rewardType: !!props?.defaultRewardType ? props.defaultRewardType : 'default',
+      rewardType: props?.defaultRewardType ? props.defaultRewardType : 'default',
       sharedSnippetText: null,
       onLoadDraftPress: false,
       thumbUrl: '',
+      videoThumbs: [],
       shouldReblog: false,
       postDescription: '',
     };
@@ -108,34 +155,80 @@ class EditorContainer extends Component<EditorContainerProps, any> {
   // Component Life Cycle Functions
   componentDidMount() {
     this._isMounted = true;
-    const { currentAccount, route, draftsCollection, queryClient, dispatch } = this.props;
+    const { currentAccount, route, queryClient, dispatch, pinCode, intl } = this.props;
     const username = currentAccount && currentAccount.name ? currentAccount.name : '';
-    let isReply;
-    let draftId;
+    const accessToken = currentAccount?.local?.accessToken
+      ? decryptKey(currentAccount.local.accessToken, getDigitPinCode(pinCode))
+      : '';
+    let isReply: any;
+    let draftId: any;
     let isEdit;
     let post;
-    let _draft;
     let hasSharedIntent = false;
+    let hasTemplateDraft = false;
 
     if (route.params) {
       const navigationParams = route.params;
-      const { hasSharedIntent: _hasShared, draftId: _draftId } = navigationParams;
+      const { hasSharedIntent: _hasShared, draftId: _draftId, templateDraft } = navigationParams;
       hasSharedIntent = _hasShared;
+      hasTemplateDraft = !!templateDraft;
 
       if (_draftId) {
         draftId = _draftId;
-        const cachedDrafts: any = queryClient.getQueryData([QUERIES.DRAFTS.GET]);
 
-        if (cachedDrafts && cachedDrafts.length) {
-          // get draft from query cache
-          const _draft = cachedDrafts.find((draft) => draft._id === draftId);
+        // Try to get draft from infinite query cache (SDK structure)
+        // Search through all loaded pages
+        let paramDraft = null;
+        const { queryKey: infiniteQueryKey } = getDraftsInfiniteQueryOptions(
+          username,
+          accessToken,
+          20,
+        );
+        const infiniteQueryData: any = queryClient.getQueryData(infiniteQueryKey);
 
-          this.setState({
-            draftId,
-          });
-
-          this._getStorageDraft(username, isReply, _draft);
+        if (infiniteQueryData?.pages) {
+          const allDrafts = infiniteQueryData.pages.flatMap((page: any) => page?.data || []);
+          paramDraft = allDrafts.find((draft: any) => draft._id === draftId) || null;
         }
+
+        // Set the draftId in state immediately
+        this.setState({
+          draftId,
+        });
+
+        // If draft is in cache, load it immediately
+        if (paramDraft) {
+          this._getStorageDraft(username, isReply, paramDraft);
+        }
+        // If not in cache, fetch from API to get the specific draft
+        // This handles cases where the draft is on a page that hasn't been loaded yet
+        else {
+          const draftsQueryOptions = getDraftsQueryOptions(username, accessToken);
+          queryClient
+            .fetchQuery(draftsQueryOptions)
+            .then((result: any) => {
+              const drafts = Array.isArray(result) ? result : result?.data || [];
+              const fetchedDraft = drafts.find((d: any) => d._id === draftId);
+              if (fetchedDraft) {
+                this._getStorageDraft(username, isReply, fetchedDraft);
+              }
+            })
+            .catch((err: any) => {
+              console.warn('Failed to fetch draft from API', err);
+              dispatch(
+                toastNotification(
+                  intl.formatMessage({
+                    id: 'alert.fail',
+                    defaultMessage: 'Fetch failed.',
+                  }),
+                ),
+              );
+            });
+        }
+      }
+
+      if (templateDraft) {
+        this._applyTemplateDraft(templateDraft);
       }
 
       if (navigationParams.community) {
@@ -157,12 +250,22 @@ class EditorContainer extends Component<EditorContainerProps, any> {
 
         if (post) {
           draftId = `${currentAccount.name}/${post.author}/${post.permlink}`;
-          const _draft = draftsCollection && draftsCollection[draftId];
+          // For replies, use replyCache instead of draftsCollection
+          const { replyCache } = this.props;
+          const _replyDraft = replyCache && replyCache[draftId];
 
-          if (_draft && !!_draft.body) {
-            const _mediaUrls = navigationParams.replyMediaUrls;
+          if (_replyDraft && !!_replyDraft.body) {
+            const cachedMediaUrls = _replyDraft.meta?.image;
+            const _mediaUrls =
+              navigationParams.replyMediaUrls?.length > 0
+                ? navigationParams.replyMediaUrls
+                : Array.isArray(cachedMediaUrls)
+                ? cachedMediaUrls
+                : [];
             _draftBody =
-              _mediaUrls.length > 0 ? `${_draft.body}\n\n ![](${_mediaUrls[0]})` : _draft.body;
+              _mediaUrls.length > 0
+                ? `${_replyDraft.body}\n\n ![](${_mediaUrls[0]})`
+                : _replyDraft.body;
           }
         }
 
@@ -178,18 +281,16 @@ class EditorContainer extends Component<EditorContainerProps, any> {
 
       if (navigationParams.isEdit) {
         ({ isEdit } = navigationParams);
+        // For comments, markdownBody might not be set, so fall back to body
+        const postBody = get(post, 'markdownBody', '') || get(post, 'body', '');
         this.setState({
           isEdit,
           draftPost: {
             title: get(post, 'title', ''),
-            body: get(post, 'markdownBody', ''),
+            body: postBody,
             tags: get(post, 'json_metadata.tags', []),
           },
         });
-      }
-
-      if (navigationParams.action) {
-        this._handleRoutingAction(navigationParams.action);
       }
 
       // handle file/text shared from ReceiveSharingIntent
@@ -197,7 +298,7 @@ class EditorContainer extends Component<EditorContainerProps, any> {
         const { files } = navigationParams;
         console.log('files : ', files);
 
-        files.forEach((el) => {
+        files.forEach((el: any) => {
           if (el.text) {
             this.setState({
               sharedSnippetText: el.text,
@@ -207,7 +308,7 @@ class EditorContainer extends Component<EditorContainerProps, any> {
       }
     }
 
-    if (!isEdit && !_draft && !draftId && !hasSharedIntent) {
+    if (!isEdit && !draftId && !hasSharedIntent && !hasTemplateDraft) {
       this._fetchDraftsForComparison(isReply);
     }
     this._requestKeyboardFocus();
@@ -238,25 +339,39 @@ class EditorContainer extends Component<EditorContainerProps, any> {
   }
 
   _handleAppStateChange = (nextAppState: AppStateStatus) => {
-    if (this._appState.match(/active|forground/) && nextAppState === 'inactive') {
+    // iOS emits 'inactive' when backgrounding; Android emits 'background'. Use exact
+    // equality — a regex like /active/ also matches 'inactive', which would save
+    // twice on iOS (active->inactive, then inactive->background). Only save when
+    // there are pending edits, since _saveCurrentDraft dereferences the fields.
+    const wasForeground = this._appState === 'active';
+    const movingToBackground = nextAppState === 'inactive' || nextAppState === 'background';
+    if (wasForeground && movingToBackground && this._updatedDraftFields) {
       this._saveCurrentDraft(this._updatedDraftFields);
     }
     this._appState = nextAppState;
   };
 
-  _getStorageDraft = async (username, isReply, paramDraft) => {
-    const { draftsCollection } = this.props;
+  _getStorageDraft = async (username: any, isReply: any, paramDraft?: any) => {
+    const { draftsCollection, replyCache } = this.props;
     if (isReply) {
-      const _draft = draftsCollection && draftsCollection[paramDraft._id];
+      // For replies, use replyCache instead of draftsCollection
+      const replyId = paramDraft?._id || this.state.draftId;
+      if (!replyId) {
+        return;
+      }
+      const _draft = replyCache && replyCache[replyId];
       if (_draft && !!_draft.body) {
+        const cachedMedia = _draft.meta?.image;
+        const mediaUrls = Array.isArray(cachedMedia) ? cachedMedia : [];
+        const bodyWithMedia =
+          mediaUrls.length > 0 ? `${_draft.body}\n\n ![](${mediaUrls[0]})` : _draft.body;
         this.setState({
           draftPost: {
-            body: _draft.body,
+            body: bodyWithMedia,
           },
         });
       }
     } else {
-      // TOOD: get draft from redux after reply side is complete
       const _draftId = paramDraft ? paramDraft._id : DEFAULT_USER_DRAFT_ID + username;
       const _localDraft = draftsCollection && draftsCollection[_draftId];
 
@@ -282,9 +397,18 @@ class EditorContainer extends Component<EditorContainerProps, any> {
       // if above fails with either no result returned or timestamp is old,
       // and use draft form nav param if available.
       else if (paramDraft) {
-        const _tags = paramDraft.tags.includes(' ')
-          ? paramDraft.tags.split(' ')
-          : paramDraft.tags.split(',');
+        // SDK returns tags_arr (array) and tags (string)
+        // Prefer tags_arr if available, otherwise parse tags string
+        let _tags = [];
+        if (paramDraft.tags_arr && Array.isArray(paramDraft.tags_arr)) {
+          _tags = paramDraft.tags_arr;
+        } else if (paramDraft.tags) {
+          _tags = paramDraft.tags
+            .split(/[,\s]+/)
+            .map((tag: any) => tag.trim())
+            .filter((tag: any) => !!tag);
+        }
+
         this.setState({
           draftPost: {
             title: paramDraft.title || '',
@@ -300,15 +424,59 @@ class EditorContainer extends Component<EditorContainerProps, any> {
     }
   };
 
+  // hydrates editor from a template draft as a NEW post; draftId is intentionally left
+  // unset so the first save/autosave creates a new draft instead of editing the template
+  _applyTemplateDraft = (templateDraft: any) => {
+    const { dispatch, intl } = this.props;
+
+    // SDK returns tags_arr (array) and tags (string)
+    let _tags = [];
+    if (templateDraft.tags_arr && Array.isArray(templateDraft.tags_arr)) {
+      _tags = templateDraft.tags_arr;
+    } else if (templateDraft.tags) {
+      _tags = templateDraft.tags
+        .split(/[,\s]+/)
+        .map((tag: any) => tag.trim())
+        .filter((tag: any) => !!tag);
+    }
+
+    // strip template markers so they don't carry over into the new post's draft
+    const _meta = templateDraft.meta ? { ...templateDraft.meta } : null;
+    if (_meta) {
+      delete _meta.postTemplate;
+      delete _meta.templateName;
+    }
+
+    this.setState({
+      draftPost: {
+        title: templateDraft.title || '',
+        body: templateDraft.body || '',
+        tags: _tags,
+        meta: _meta,
+      },
+    });
+
+    // no _id and no state.draftId here, so beneficiaries/poll land under the same
+    // default key the new-post flow reads (DEFAULT_USER_DRAFT_ID + account name)
+    this._loadMeta({ meta: _meta });
+
+    dispatch(toastNotification(intl.formatMessage({ id: 'templates.applied' })));
+  };
+
   // load meta from local/param drfat into state
   _loadMeta = (draft: any) => {
     const { dispatch, currentAccount } = this.props;
+    const { draftId } = this.state;
+
     // if meta exist on draft, get the index of 1st image in meta from images urls in body
     // const body = draft.body;
     if (draft.meta && draft.meta.image) {
       // const urls = extractImageUrls({ body });
       this.setState({
         thumbUrl: draft.meta.image[0],
+        // A video thumbnail is not in the body, so rebuild the association the draft could
+        // not carry, otherwise reopening silently drops the cover.
+        videoThumbs: restoreVideoThumbs(draft.body, draft.meta.image),
       });
     }
 
@@ -325,21 +493,26 @@ class EditorContainer extends Component<EditorContainerProps, any> {
       });
     }
 
-    if (draft._id) {
-      if (isArray(draft.meta?.beneficiaries)) {
-        const filteredBeneficiaries = draft.meta.beneficiaries.filter(
-          (item) => item.account !== currentAccount.username,
-        ); // remove default beneficiary from array while saving
+    // Use draft._id if available, otherwise use draftId from state, or fallback to DEFAULT_USER_DRAFT_ID
+    const _draftId = draft._id || draftId || DEFAULT_USER_DRAFT_ID + currentAccount.name;
 
-        dispatch(setBeneficiaries(draft._id || DEFAULT_USER_DRAFT_ID, filteredBeneficiaries));
-      }
+    if (isArray(draft.meta?.beneficiaries)) {
+      const filteredBeneficiaries = draft.meta.beneficiaries.filter(
+        (item: any) => item.account !== currentAccount.name,
+      ); // remove default beneficiary from array while saving
 
-      if (draft.meta?.poll) {
-        dispatch(setPollDraftAction(draft._id, draft.meta.poll));
+      // an empty list in draft meta is just the absence default written by
+      // draft saves, not an explicit user choice; storing it would wrongly
+      // mark the draft as having a customized beneficiary list and block the
+      // voluntary support beneficiary injection at publish time
+      if (filteredBeneficiaries.length > 0) {
+        dispatch(setBeneficiaries(_draftId, filteredBeneficiaries));
       }
     }
 
-    // TODO: handle poll meta load here load
+    if (draft.meta?.poll) {
+      dispatch(setPollDraftAction(_draftId, draft.meta.poll));
+    }
   };
 
   _requestKeyboardFocus = () => {
@@ -359,8 +532,8 @@ class EditorContainer extends Component<EditorContainerProps, any> {
    * prompts user as well
    * @param isReply
    * */
-  _fetchDraftsForComparison = async (isReply) => {
-    const { currentAccount, isLoggedIn, draftsCollection } = this.props;
+  _fetchDraftsForComparison = async (isReply: any) => {
+    const { currentAccount, isLoggedIn, draftsCollection, pinCode } = this.props;
     const username = get(currentAccount, 'name', '');
 
     // initilizes editor with reply or non remote id less draft
@@ -395,7 +568,16 @@ class EditorContainer extends Component<EditorContainerProps, any> {
         return;
       }
 
-      const remoteDrafts = await getDrafts();
+      const accessToken = currentAccount?.local?.accessToken
+        ? decryptKey(currentAccount.local.accessToken, getDigitPinCode(pinCode))
+        : '';
+      const draftsQueryOptions = getDraftsQueryOptions(username, accessToken);
+      const { queryClient } = this.props;
+      const result = await queryClient.fetchQuery(draftsQueryOptions);
+      // templates are applied explicitly from the templates tab, never offered as recent draft
+      const remoteDrafts = (Array.isArray(result) ? result : result?.data || []).filter(
+        (draft: any) => !isTemplateDraft(draft),
+      );
 
       const loadRecentDraft = () => {
         // if no draft available means local draft is recent
@@ -405,7 +587,7 @@ class EditorContainer extends Component<EditorContainerProps, any> {
         }
 
         // sort darts based on timestamps
-        remoteDrafts.sort((d1, d2) =>
+        remoteDrafts.sort((d1: any, d2: any) =>
           new Date(d1.modified).getTime() < new Date(d2.modified).getTime() ? 1 : -1,
         );
         const _draft = remoteDrafts[0];
@@ -430,38 +612,77 @@ class EditorContainer extends Component<EditorContainerProps, any> {
 
   _extractBeneficiaries = () => {
     const { draftId } = this.state;
-    const { beneficiariesMap } = this.props;
+    const { beneficiariesMap, currentAccount } = this.props;
 
-    return beneficiariesMap[draftId || DEFAULT_USER_DRAFT_ID] || [];
+    // Use same draft ID logic as in _loadMeta to avoid key mismatch
+    const _draftId = draftId || DEFAULT_USER_DRAFT_ID + currentAccount.name;
+
+    return beneficiariesMap[_draftId] || [];
+  };
+
+  /**
+   * Whether the author set a beneficiary list for this draft. The submit path
+   * injects the Ecency support beneficiary only when they did not, so the RC
+   * estimate needs the same signal to price comment_options correctly.
+   */
+  _hasExplicitBeneficiaries = () => {
+    const { draftId } = this.state;
+    const { beneficiariesMap, currentAccount } = this.props;
+
+    const _draftId = draftId || DEFAULT_USER_DRAFT_ID + currentAccount.name;
+
+    return !!beneficiariesMap && Object.prototype.hasOwnProperty.call(beneficiariesMap, _draftId);
   };
 
   _extractPollDraft = () => {
     const { draftId } = this.state;
-    const { pollDraftsMap } = this.props;
+    const { pollDraftsMap, currentAccount } = this.props;
 
-    return pollDraftsMap[draftId || DEFAULT_USER_DRAFT_ID];
+    // Use same draft ID logic as in _loadMeta to avoid key mismatch
+    const _draftId = draftId || DEFAULT_USER_DRAFT_ID + currentAccount.name;
+
+    return pollDraftsMap[_draftId];
   };
 
-  _saveDraftToDB = async (fields, saveAsNew = false) => {
-    const { isDraftSaved, draftId, thumbUrl, isReply, rewardType, postDescription } = this.state;
-    const { currentAccount, dispatch, intl, queryClient, speakContentBuilder } = this.props;
+  _extractDraftCaret = () => {
+    const { draftId } = this.state;
+    const { caretMap, currentAccount } = this.props;
+
+    // Use same draft ID logic as in _loadMeta to avoid key mismatch
+    const _draftId = draftId || DEFAULT_USER_DRAFT_ID + currentAccount.name;
+
+    return caretMap?.[_draftId];
+  };
+
+  _saveDraftToDB = async (fields: any, saveAsNew = false) => {
+    // Once a post is published, skip any further draft save (e.g. the unmount
+    // autosave) so the source draft is never silently re-written or recreated;
+    // the user decides whether to delete it via the publish-success prompt.
+    if (this._isPublished) {
+      return;
+    }
+
+    const { isDraftSaved, draftId, thumbUrl, videoThumbs, isReply, rewardType, postDescription } =
+      this.state;
+    const { currentAccount, dispatch, intl, queryClient, pinCode } = this.props;
 
     try {
       // saves draft locallly
       this._saveCurrentDraft(this._updatedDraftFields);
     } catch (err) {
       console.warn('local draft safe failed, skipping for remote only', err);
-      bugsnapInstance.notify(err);
+      Sentry.captureException(err);
     }
 
     if (isReply) {
       return;
     }
 
-    speakContentBuilder.build(fields.body);
-
     const beneficiaries = this._extractBeneficiaries();
     const pollDraft = this._extractPollDraft();
+    // Captured before the draftId-changing setState below so it reads the temp
+    // compose key; carried to the new draft id when a first server draft is made.
+    const draftCaret = this._extractDraftCaret();
     const postBodySummaryContent = postBodySummary(
       get(fields, 'body', ''),
       200,
@@ -488,20 +709,8 @@ class EditorContainer extends Component<EditorContainerProps, any> {
         const _extractedMeta = await extractMetadata({
           body: draftField.body,
           thumbUrl,
-          videoThumbUrls: speakContentBuilder.thumbUrlsRef.current,
+          videoThumbUrls: collectVideoThumbUrls({ videoThumbs, body: draftField.body }),
           fetchRatios: false,
-        });
-
-        // inject video meta for draft
-        const speakIds = extract3SpeakIds({ body: draftField.body });
-        const videos: any = {};
-        const videosCache: any = queryClient.getQueryData([QUERIES.MEDIA.GET_VIDEOS]);
-
-        speakIds.forEach((_id) => {
-          const videoItem = videosCache.find((item) => item._id === _id);
-          if (videoItem?.speakData) {
-            videos[_id] = videoItem.speakData;
-          }
         });
 
         const meta = Object.assign({}, _extractedMeta, {
@@ -510,14 +719,54 @@ class EditorContainer extends Component<EditorContainerProps, any> {
           poll: pollDraft,
           rewardType,
           description: postDescription || postBodySummaryContent,
-          videos: Object.keys(videos).length > 0 && videos,
         });
 
+        // Persist the AI-usage disclosure so it survives a draft save/reopen round-trip.
+        const _draftAiTools = cleanAiTools(draftField.aiTools);
+        if (_draftAiTools) {
+          meta.ai_tools = _draftAiTools;
+        }
+
         const jsonMeta = makeJsonMetadata(meta, draftField.tags);
+
+        const username = currentAccount.name;
+        const accessToken = currentAccount?.local?.accessToken
+          ? decryptKey(currentAccount.local.accessToken, getDigitPinCode(pinCode))
+          : '';
+
+        // If no access token, skip remote save (local cache already updated)
+        if (!accessToken) {
+          if (this._isMounted) {
+            this.setState({
+              isDraftSaving: false,
+            });
+          }
+          dispatch(
+            toastNotification(
+              intl.formatMessage({
+                id: 'editor.draft_save_fail',
+              }),
+            ),
+          );
+          return;
+        }
+
+        // The guard at the top of this method ran before the awaits above, so a save
+        // that started just before the user hit publish would land here afterwards
+        // and rewrite (or recreate) the server draft the publish flow is asking the
+        // user about. Re-check right before the mutation; the local cache is already
+        // written and is guarded on its own.
+        if (this._isPublished) {
+          if (this._isMounted) {
+            this.setState({ isDraftSaving: false });
+          }
+          return;
+        }
 
         // update draft is draftId is present
         if (draftId && draftField && !saveAsNew) {
           await updateDraft(
+            accessToken,
             draftId,
             draftField.title || '',
             draftField.body,
@@ -536,9 +785,11 @@ class EditorContainer extends Component<EditorContainerProps, any> {
         // create new darft otherwise
         else if (draftField) {
           const { title, body, tags } = draftField;
-          const draft = { title, body, tags, meta: jsonMeta };
-          const response = await addDraft(draft);
-          const _resDraft = response.pop();
+          const response = await addDraft(accessToken, title, body, tags, jsonMeta);
+          const _resDraft =
+            response?.drafts?.[0] || // array wrapper format
+            (response as any)?.[0] || // direct array format
+            ((response as any)?._id ? response : null); // single object format
 
           if (!_resDraft) {
             throw new Error('newly saved draft not returned in response');
@@ -552,7 +803,7 @@ class EditorContainer extends Component<EditorContainerProps, any> {
             });
           }
           const filteredBeneficiaries = beneficiaries.filter(
-            (item) => item.account !== currentAccount.username,
+            (item: any) => item.account !== currentAccount.name,
           ); // remove default beneficiary from array while saving
           dispatch(setBeneficiaries(_resDraft._id, filteredBeneficiaries));
 
@@ -560,12 +811,18 @@ class EditorContainer extends Component<EditorContainerProps, any> {
             dispatch(setPollDraftAction(_resDraft._id, pollDraft));
           }
 
-          // TODO: assess if need to set poll meta here as well
-          dispatch(removeEditorCache(DEFAULT_USER_DRAFT_ID));
+          // Carry the caret to the new draft id too, so reopening the just-saved
+          // draft before the next selection change still restores the position.
+          if (typeof draftCaret === 'number') {
+            dispatch(setDraftCaret(_resDraft._id, draftCaret));
+          }
 
-          // clear local copy if darft save is successful
-          const username = get(currentAccount, 'name', '');
+          // Per-account key: the temp compose entries (beneficiaries, poll,
+          // caret) are stored under `DEFAULT_USER_DRAFT_ID + currentAccount.name`
+          // (not the bare id), so clear them with the same key.
+          dispatch(removeEditorCache(DEFAULT_USER_DRAFT_ID + currentAccount.name));
 
+          // clear local copy if draft save is successful
           dispatch(deleteDraftCacheEntry(draftId || DEFAULT_USER_DRAFT_ID + username));
         }
 
@@ -579,7 +836,17 @@ class EditorContainer extends Component<EditorContainerProps, any> {
 
         // call fetch post to drafts screen
         if (queryClient) {
-          queryClient.invalidateQueries([QUERIES.DRAFTS.GET]);
+          const { queryKey: draftsQueryKey } = getDraftsQueryOptions(
+            currentAccount.name,
+            accessToken,
+          );
+          const { queryKey: draftsInfiniteKey } = getDraftsInfiniteQueryOptions(
+            currentAccount.name,
+            accessToken,
+            20,
+          );
+          queryClient.invalidateQueries({ queryKey: draftsQueryKey });
+          queryClient.invalidateQueries({ queryKey: draftsInfiniteKey });
         }
       }
     } catch (err) {
@@ -601,35 +868,163 @@ class EditorContainer extends Component<EditorContainerProps, any> {
     }
   };
 
-  _updateDraftFields = (fields) => {
+  // Saves the current compose state as a NEW template draft (meta.postTemplate +
+  // meta.templateName, same convention as Ecency web). Always addDraft: it never
+  // updates the draft being composed, never touches state.draftId/isDraftSaved/
+  // isDraftSaving and never clears local draft caches, so the normal draft
+  // autosave flow keeps working on whatever the user is writing.
+  _saveAsTemplate = async (fields: any, templateName: string) => {
+    const { isReply, isEdit, thumbUrl, videoThumbs, rewardType, postDescription } = this.state;
+    const { currentAccount, dispatch, intl, queryClient, pinCode } = this.props;
+
+    if (isReply || isEdit || !fields) {
+      return;
+    }
+
+    const beneficiaries = this._extractBeneficiaries();
+    const pollDraft = this._extractPollDraft();
+
+    try {
+      const draftField = {
+        ...fields,
+        // a template can be a title-only scaffold; keep body a string throughout
+        body: fields.body || '',
+        tags: fields.tags && fields.tags.length > 0 ? fields.tags.join(' ') : '',
+      };
+
+      const _extractedMeta = await extractMetadata({
+        body: draftField.body,
+        thumbUrl,
+        videoThumbUrls: collectVideoThumbUrls({ videoThumbs, body: draftField.body }),
+        fetchRatios: false,
+      });
+
+      const postBodySummaryContent = postBodySummary(
+        draftField.body || '',
+        200,
+        Platform.OS as any,
+      );
+
+      const meta = Object.assign({}, _extractedMeta, {
+        tags: draftField.tags,
+        beneficiaries,
+        poll: pollDraft,
+        rewardType,
+        description: postDescription || postBodySummaryContent,
+        postTemplate: true,
+        templateName,
+      });
+
+      const jsonMeta = makeJsonMetadata(meta, draftField.tags);
+
+      const accessToken = currentAccount?.local?.accessToken
+        ? decryptKey(currentAccount.local.accessToken, getDigitPinCode(pinCode))
+        : '';
+
+      if (!accessToken) {
+        dispatch(toastNotification(intl.formatMessage({ id: 'editor.draft_save_fail' })));
+        return;
+      }
+
+      await addDraft(
+        accessToken,
+        draftField.title || '',
+        draftField.body,
+        draftField.tags,
+        jsonMeta,
+      );
+
+      dispatch(toastNotification(intl.formatMessage({ id: 'templates.saved' })));
+
+      // refresh drafts/templates lists so the new template shows up
+      if (queryClient) {
+        const { queryKey: draftsQueryKey } = getDraftsQueryOptions(
+          currentAccount.name,
+          accessToken,
+        );
+        const { queryKey: draftsInfiniteKey } = getDraftsInfiniteQueryOptions(
+          currentAccount.name,
+          accessToken,
+          20,
+        );
+        queryClient.invalidateQueries({ queryKey: draftsQueryKey });
+        queryClient.invalidateQueries({ queryKey: draftsInfiniteKey });
+      }
+    } catch (err) {
+      console.warn('Failed to save template', err);
+      dispatch(toastNotification(intl.formatMessage({ id: 'editor.draft_save_fail' })));
+    }
+  };
+
+  _updateDraftFields = (fields: any) => {
     this._updatedDraftFields = fields;
   };
 
-  _saveCurrentDraft = async (fields) => {
-    const { draftId, isReply, isEdit, isPostSending } = this.state;
+  _saveCurrentDraft = async (fields: any) => {
+    const { draftId, isReply, isEdit, isPostSending, rewardType, postDescription, thumbUrl } =
+      this.state;
 
     // skip draft save in case post is sending or is post beign edited
     if (isPostSending || isEdit) {
       return;
     }
 
+    // Once published, never write the draft cache again (same rule _saveDraftToDB
+    // applies). Debounced/late saves — the 300ms form timer, an image upload
+    // resolving after the editor closed — would otherwise re-create the cache
+    // entry that publishing just deleted, resurfacing the post as a ghost draft.
+    if (this._isPublished) {
+      return;
+    }
+
     const { currentAccount, dispatch } = this.props;
     const username = currentAccount && currentAccount.name ? currentAccount.name : '';
+
+    // Extract beneficiaries and poll data to store in meta
+    const beneficiaries = this._extractBeneficiaries();
+    const pollDraft = this._extractPollDraft();
+
+    // Build meta object with beneficiaries and other settings
+    const meta: any = {};
+
+    if (isArray(beneficiaries) && beneficiaries.length > 0) {
+      meta.beneficiaries = beneficiaries;
+    }
+
+    if (pollDraft) {
+      meta.poll = pollDraft;
+    }
+
+    if (rewardType) {
+      meta.rewardType = rewardType;
+    }
+
+    if (postDescription) {
+      meta.description = postDescription;
+    }
+
+    if (thumbUrl) {
+      meta.image = [thumbUrl];
+    }
 
     const draftField = {
       title: fields.title || '',
       body: fields.body || '',
       tags: fields.tags && fields.tags.length > 0 ? fields.tags.toString() : '',
       author: username,
-      meta: fields.meta && fields.meta,
+      meta: Object.keys(meta).length > 0 ? meta : undefined,
     };
 
-    // save reply data or save existing draft data locall
-    if (isReply || draftId) {
+    // save reply data to replyCache, draft data to draftsCollection
+    if (isReply) {
+      // Replies go to replyCache - use fallback if draftId is undefined
+      const replyId = draftId || DEFAULT_USER_DRAFT_ID + username;
+      dispatch(updateReplyCache(replyId, draftField));
+    } else if (draftId) {
+      // Editing existing draft goes to draftsCollection
       dispatch(updateDraftCache(draftId, draftField));
-    }
-    // update editor data locally
-    else if (!isReply) {
+    } else {
+      // New post autosave goes to draftsCollection
       dispatch(updateDraftCache(DEFAULT_USER_DRAFT_ID + username, draftField));
     }
   };
@@ -640,90 +1035,169 @@ class EditorContainer extends Component<EditorContainerProps, any> {
   }: {
     fields: any;
     scheduleDate?: string;
-  }) => {
-    const {
-      currentAccount,
-      dispatch,
-      intl,
-      navigation,
-      pinCode,
-      userActivityMutation,
-      speakContentBuilder,
-      speakMutations,
-    } = this.props;
-    const { rewardType, isPostSending, thumbUrl, draftId, shouldReblog } = this.state;
+  }): Promise<any> => {
+    const { currentAccount, dispatch, intl, navigation, queryClient, pinCode } = this.props;
+    const { rewardType, isPostSending, thumbUrl, videoThumbs, draftId, shouldReblog } = this.state;
 
     const fields = Object.assign({}, _fieldsBase);
     let beneficiaries = this._extractBeneficiaries();
     const pollDraft = this._extractPollDraft();
-    let videoPublishMeta: ThreeSpeakVideo | undefined = undefined;
 
     if (isPostSending) {
+      // `_handleSubmit` set `_isSubmitting=true` to gate the confirm Alert;
+      // bailing out here without clearing it would leave the editor wedged.
+      this._isSubmitting = false;
       return;
     }
 
-    if (currentAccount) {
-      // build speak video body
+    if (!currentAccount) {
+      this._isSubmitting = false;
+      return;
+    }
+
+    // Re-arm the synchronous guard at function top (see matching comment in
+    // `_submitEdit`). Idempotent on initial entry; required on recursive
+    // entry after a HiveAuth prompt to undo the pre-await reset below.
+    this._isSubmitting = true;
+
+    // Enforce 3Speak beneficiary if post contains an embed URL
+    beneficiaries = enforceThreeSpeakBeneficiary(beneficiaries, fields.body);
+
+    // Voluntary Support Ecency beneficiary based on user's saved support
+    // settings. Applied ONLY when the user has no explicit beneficiary list
+    // for this draft: once the beneficiary modal persisted a list (including
+    // one where the ecency row was removed or added at a custom weight), that
+    // list is the source of truth and is published as-is. Fails open: any
+    // fetch error publishes without injection. Double-submit while awaiting
+    // is guarded by `_isSubmitting` (armed above).
+    const { beneficiariesMap } = this.props;
+    const _benefDraftId = draftId || DEFAULT_USER_DRAFT_ID + currentAccount.name;
+    const _hasExplicitBeneficiaries =
+      !!beneficiariesMap && Object.prototype.hasOwnProperty.call(beneficiariesMap, _benefDraftId);
+
+    if (!_hasExplicitBeneficiaries && currentAccount.name !== ECENCY_SUPPORT_ACCOUNT) {
+      let supportPercent = 0;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
       try {
-        fields.body = speakContentBuilder.build(fields.body);
-        videoPublishMeta = speakContentBuilder.videoPublishMetaRef.current;
-
-        // verify and make video beneficiaries redundent
-        beneficiaries = beneficiaries.filter((item) => item.src !== BENEFICIARY_SRC_ENCODER);
-        if (videoPublishMeta) {
-          const encoderBene = [
-            ...JSON.parse(videoPublishMeta.beneficiaries || '[]'),
-            ...DEFAULT_SPEAK_BENEFICIARIES,
-          ];
-          beneficiaries = [...encoderBene, ...beneficiaries];
+        let accessToken = currentAccount?.local?.accessToken
+          ? decryptKey(currentAccount.local.accessToken, getDigitPinCode(pinCode))
+          : undefined;
+        if (!accessToken && currentAccount?.local?.accessToken) {
+          // HiveAuth accounts use the default pin unless the user changed it
+          // (mirrors useAuth); without this their saved preference would
+          // silently never apply
+          accessToken = decryptKey(currentAccount.local.accessToken, Config.DEFAULT_PIN);
         }
+        // shared SDK query key: reuses/warms the same cache entry the settings
+        // screen and beneficiary modal read
+        const fetchSettings = queryClient.fetchQuery({
+          ...getSupportSettingsQueryOptions(currentAccount.name, accessToken),
+          retry: false,
+        });
+        // if the timeout wins the race below, this promise is orphaned; mark
+        // its rejection handled so a late fetch failure cannot fire an
+        // unhandled promise rejection (race still rejects when fetch loses
+        // first, which the surrounding catch fails open on)
+        fetchSettings.catch(() => {});
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error('support settings fetch timed out')),
+            SUPPORT_SETTINGS_FETCH_TIMEOUT_MS,
+          );
+        });
+        const supportSettings = await Promise.race([fetchSettings, timeout]);
+        supportPercent = supportSettings?.beneficiary_percent || 0;
+      } catch (error) {
+        supportPercent = 0;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      beneficiaries = injectEcencySupportBeneficiary(beneficiaries, supportPercent);
+    }
 
-        // TODO: handle poll draft publishing with meta data;
-      } catch (err) {
-        console.warn('fail', err);
+    this.setState({
+      isPostSending: true,
+    });
+
+    // Check if we should prompt for posting authority (HiveAuth users without authority)
+    if (shouldPromptPostingAuthority(currentAccount)) {
+      // Guard against infinite recursion
+      if (this._postingAuthorityPromptShown) {
+        console.warn('Posting authority prompt already shown, preventing recursion');
+        this.setState({ isPostSending: false });
+        this._isSubmitting = false;
         return;
       }
 
-      if (scheduleDate && videoPublishMeta) {
-        dispatch(
-          showActionModal({
-            title: intl.formatMessage({ id: 'alert.notice' }),
-            body: intl.formatMessage({ id: 'editor.schedule_video_unsupported' }),
-          }),
-        );
+      this._postingAuthorityPromptShown = true;
+      this.setState({ isPostSending: false }); // Reset state before showing prompt
+      // Release the synchronous guard *before* the await so a dismissed-
+      // without-callback prompt sheet (swipe, app backgrounded, …) doesn't
+      // permanently wedge the publish button. The recursive call below
+      // re-arms it at function top.
+      this._isSubmitting = false;
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          SheetManager.show(SheetNames.POSTING_AUTHORITY_PROMPT, {
+            payload: {
+              onGranted: () => resolve(),
+              onSkipped: () => resolve(),
+              onError: (error) => reject(error),
+            },
+          });
+        });
+
+        // Recursive call re-enters at function top (which re-arms
+        // `_isSubmitting`); eventually hits success/failure handlers.
+        return this._submitPost({ fields, scheduleDate });
+      } catch (error) {
+        // Error granting posting authority - don't retry
+        // (`_isSubmitting` already false from above.)
+        console.warn('Failed to grant posting authority:', error);
+        this.setState({ isPostSending: false });
+        this._isSubmitting = false;
         return;
+      } finally {
+        this._postingAuthorityPromptShown = false;
       }
+    }
 
-      this.setState({
-        isPostSending: true,
-      });
-
-      // only require video meta for unpublished video, it will always be one
+    // Outer catch: route any error escaping the inner mutation try/catch
+    // (extractMetadata reject, generatePermlink throw, _setScheduledPost
+    // throw, etc.) through _handleSubmitFailure so `_isSubmitting`,
+    // `isPostSending`, and the user-visible toast are all handled
+    // consistently. Without this, an early failure would leave the editor
+    // wedged on `_isSubmitting=true` until remount.
+    try {
       const meta = await extractMetadata({
         body: fields.body,
         thumbUrl,
-        videoThumbUrls: speakContentBuilder.thumbUrlsRef.current,
+        videoThumbUrls: collectVideoThumbUrls({ videoThumbs, body: fields.body }),
         fetchRatios: true,
-        videoPublishMeta,
         pollDraft,
       });
-      const _tags = fields.tags.filter((tag) => tag && tag !== ' ');
+      const _tags = fields.tags.filter((tag: any) => tag && tag !== ' ');
+
+      const aiTools = cleanAiTools(fields.aiTools);
+      if (aiTools) {
+        meta.ai_tools = aiTools;
+      }
 
       const jsonMeta = makeJsonMetadata(meta, _tags);
 
-      // TODO: check if permlink is available github: #314 https://github.com/ecency/ecency-mobile/pull/314
-      let permlink = videoPublishMeta
-        ? videoPublishMeta.permlink
-        : generatePermlink(fields.title || '');
+      let permlink = generatePermlink(fields.title || '');
 
-      let dublicatePost;
+      let duplicatePost;
       try {
-        dublicatePost = await getPurePost(currentAccount.name, permlink);
+        duplicatePost = await queryClient.fetchQuery(
+          getPostQueryOptions(currentAccount.name, permlink, ''),
+        );
       } catch (e) {
-        dublicatePost = null;
+        duplicatePost = null;
       }
 
-      if (dublicatePost && dublicatePost.permlink === permlink) {
+      if (duplicatePost && duplicatePost.permlink === permlink) {
         permlink = generatePermlink(fields.title || '', true);
       }
 
@@ -735,14 +1209,18 @@ class EditorContainer extends Component<EditorContainerProps, any> {
         beneficiaries,
       });
       const parentPermlink = _tags[0] || 'hive-125125';
-      const voteWeight = null;
 
       if (scheduleDate) {
         if (fields.tags.length === 0) {
           fields.tags = ['hive-125125'];
         }
 
-        this._setScheduledPost({
+        // Awaited so that any unhandled rejection from `_setScheduledPost`
+        // (e.g., the internal catch itself throwing) propagates to the outer
+        // `_submitPost` catch, which routes through `_handleSubmitFailure`
+        // and resets `_isSubmitting`/`isPostSending`. The internal catch in
+        // `_setScheduledPost` also resets `_isSubmitting` directly.
+        await this._setScheduledPost({
           author,
           permlink,
           fields,
@@ -751,194 +1229,364 @@ class EditorContainer extends Component<EditorContainerProps, any> {
           beneficiaries,
         });
       } else {
-        await postContent(
-          currentAccount,
-          pinCode,
-          '',
-          parentPermlink,
-          permlink,
-          fields.title || '',
-          fields.body,
-          jsonMeta,
-          options,
-          voteWeight,
-        )
-          .then((response) => {
-            console.log(response);
-
-            // track user activity for points
-            userActivityMutation.mutate({
-              pointsTy: PointActivityIds.POST,
-              transactionId: response.id,
-            });
-
-            // reblog if flag is active
-            if (shouldReblog) {
-              reblog(currentAccount, pinCode, author, permlink)
-                .then((resp) => {
-                  // track user activity for points on reblog
-                  userActivityMutation.mutate({
-                    pointsTy: PointActivityIds.REBLOG,
-                    transactionId: resp.id,
-                  });
-                  console.log('Successfully reblogged post', resp);
-                })
-                .catch((err) => {
-                  console.warn('Failed to reblog post', err);
-                });
-            }
-
-            // mark unpublished video as published on 3speak if that is the case
-            if (videoPublishMeta) {
-              console.log('marking inserted video as published');
-              speakMutations.updateInfoMutation.mutate({
-                id: videoPublishMeta._id,
-                title: fields.title,
-                body: fields.body,
-                tags: fields.tags,
-              });
-              speakMutations.markAsPublishedMutation.mutate(videoPublishMeta._id);
-            }
-
-            // post publish updates
-            dispatch(deleteDraftCacheEntry(DEFAULT_USER_DRAFT_ID + currentAccount.name));
-
-            dispatch(removeEditorCache(DEFAULT_USER_DRAFT_ID));
-            if (draftId) {
-              dispatch(removeEditorCache(draftId));
-            }
-
-            dispatch(
-              toastNotification(
-                intl.formatMessage({
-                  id: 'alert.success_shared',
-                }),
-              ),
-            );
-            setTimeout(() => {
-              this.setState({
-                isPostSending: false,
-              });
-              navigation.replace(
-                ROUTES.SCREENS.PROFILE,
-                {
-                  username: get(currentAccount, 'name'),
-                },
-                {
-                  key: get(currentAccount, 'name'),
-                },
-              );
-            }, 3000);
-          })
-          .catch((error) => {
-            this._handleSubmitFailure(error);
+        try {
+          await this.props.commentMutation.mutateAsync({
+            author,
+            permlink,
+            parentAuthor: '',
+            parentPermlink,
+            title: fields.title || '',
+            body: fields.body,
+            jsonMetadata: jsonMeta,
+            options: options
+              ? {
+                  maxAcceptedPayout: (options as any).max_accepted_payout,
+                  percentHbd: (options as any).percent_hbd,
+                  allowVotes: (options as any).allow_votes,
+                  allowCurationRewards: (options as any).allow_curation_rewards,
+                  beneficiaries: Array.isArray((options as any).extensions?.[0]?.[1]?.beneficiaries)
+                    ? (options as any).extensions[0][1].beneficiaries
+                    : beneficiaries,
+                }
+              : undefined,
           });
+
+          // reblog if flag is active
+          if (shouldReblog) {
+            this.props.reblogMutation.mutateAsync({ author, permlink }).catch((err: any) => {
+              console.warn('Failed to reblog post', err);
+              dispatch(toastNotification(intl.formatMessage({ id: 'alert.fail' })));
+            });
+          }
+
+          // post publish updates
+          dispatch(deleteDraftCacheEntry(DEFAULT_USER_DRAFT_ID + currentAccount.name));
+
+          // Per-account key so the new-compose editor cache (beneficiaries,
+          // poll, caret) is actually cleared on publish — the temp entries are
+          // stored under `DEFAULT_USER_DRAFT_ID + currentAccount.name`.
+          dispatch(removeEditorCache(DEFAULT_USER_DRAFT_ID + currentAccount.name));
+          if (draftId) {
+            dispatch(removeEditorCache(draftId));
+          }
+
+          dispatch(
+            toastNotification(
+              intl.formatMessage({
+                id: 'alert.success_shared',
+              }),
+            ),
+          );
+
+          // Publishing is a strong positive signal — offer the rating prompt to
+          // engaged users (gated internally by maybeRequestReview).
+          dispatch(maybeRequestReview());
+          // Reset `_isSubmitting` synchronously on success; the screen will
+          // navigate away and unmount shortly, but until then the field must
+          // not stay true (or a fast in-window reentry would be blocked by
+          // `_handleSubmit`).
+          this._isSubmitting = false;
+          // Mark published before the unmount so the draft autosave triggered by
+          // `componentWillUnmount` is skipped and never re-writes the source
+          // draft (the user decides its fate via the prompt below).
+          this._isPublished = true;
+
+          const _navigateToProfile = () => {
+            this.setState({
+              isPostSending: false,
+            });
+            navigation.replace(ROUTES.SCREENS.PROFILE, {
+              username: get(currentAccount, 'name'),
+              key: get(currentAccount, 'name'),
+            });
+            // Offer the own-notifications email digest once after the FIRST
+            // publish (post_count is still the pre-publish value here). The
+            // sheet lives in the global SheetProvider, so it survives the
+            // editor unmounting; delayed past the navigation transition.
+            setTimeout(() => {
+              maybeOfferFirstPublishDigest(
+                get(currentAccount, 'name'),
+                get(currentAccount, 'post_count'),
+              );
+            }, 1000);
+          };
+
+          if (draftId) {
+            // The post was published from a saved draft. Offer to remove that
+            // server draft so drafts don't pile up — but never delete it
+            // without explicit confirmation. Either choice then navigates away.
+            Alert.alert(
+              intl.formatMessage({ id: 'editor.published_draft_delete_title' }),
+              intl.formatMessage({ id: 'editor.published_draft_delete_body' }),
+              [
+                {
+                  text: intl.formatMessage({ id: 'editor.published_draft_keep' }),
+                  style: 'cancel',
+                  onPress: _navigateToProfile,
+                },
+                {
+                  text: intl.formatMessage({ id: 'alert.delete' }),
+                  style: 'destructive',
+                  onPress: () => {
+                    this.props.deleteDraftMutation
+                      .mutateAsync({ draftId })
+                      .catch((err: any) => console.warn('Failed to delete published draft', err));
+                    _navigateToProfile();
+                  },
+                },
+              ],
+              { cancelable: false },
+            );
+          } else {
+            setTimeout(_navigateToProfile, 500);
+          }
+        } catch (error) {
+          this._handleSubmitFailure(error);
+        }
+      }
+    } catch (error) {
+      this._handleSubmitFailure(error);
+    }
+  };
+
+  _submitReply = async (fields: any): Promise<any> => {
+    const { currentAccount, dispatch, replyCache, commentMutation } = this.props;
+    const { isPostSending } = this.state;
+
+    if (isPostSending || this._isSubmitting) {
+      return;
+    }
+
+    if (currentAccount) {
+      // Set both flags immediately to prevent race conditions and show spinner
+      this._isSubmitting = true;
+      this.setState({ isPostSending: true });
+
+      // Check if we should prompt for posting authority (HiveAuth users without authority)
+      if (shouldPromptPostingAuthority(currentAccount)) {
+        // Guard against infinite recursion
+        if (this._postingAuthorityPromptShown) {
+          console.warn('Posting authority prompt already shown, preventing recursion');
+          this._isSubmitting = false;
+          this.setState({ isPostSending: false });
+          return;
+        }
+
+        this._postingAuthorityPromptShown = true;
+        this._isSubmitting = false; // Reset before showing prompt
+        this.setState({ isPostSending: false }); // Reset state before showing prompt
+
+        try {
+          await new Promise<void>((resolve, reject) => {
+            SheetManager.show(SheetNames.POSTING_AUTHORITY_PROMPT, {
+              payload: {
+                onGranted: () => resolve(),
+                onSkipped: () => resolve(),
+                onError: (error) => reject(error),
+              },
+            });
+          });
+
+          // Recursive call after prompt is handled - the recursive call will set _isSubmitting again
+          return this._submitReply(fields);
+        } catch (error) {
+          // Error granting posting authority - don't retry
+          console.warn('Failed to grant posting authority:', error);
+          // Reset state and abort
+          this.setState({ isPostSending: false });
+          return;
+        } finally {
+          this._postingAuthorityPromptShown = false;
+        }
+      }
+
+      this.setState({
+        isPostSending: true,
+      });
+
+      let permlink;
+      let parentAuthor;
+      let parentPermlink;
+      let draftId;
+      let jsonMetadata;
+      let author;
+      let rootAuthor;
+      let rootPermlink;
+
+      try {
+        const { post } = this.state;
+
+        const _prefix = `re-${post.author.replace(/\./g, '')}`;
+        permlink = generateUniquePermlink(_prefix);
+
+        parentAuthor = post.author;
+        parentPermlink = post.permlink;
+        const parentTags = post.json_metadata.tags;
+        draftId = `${currentAccount.name}/${parentAuthor}/${parentPermlink}`;
+
+        const meta = await extractMetadata({
+          body: fields.body,
+          fetchRatios: true,
+          postType: PostTypes.COMMENT,
+        });
+        const aiTools = cleanAiTools(fields.aiTools);
+        if (aiTools) {
+          meta.ai_tools = aiTools;
+        }
+        jsonMetadata = makeJsonMetadata(meta, parentTags || ['ecency']);
+
+        author = currentAccount.name;
+
+        // Derive root author/permlink for proper cache invalidation and optimistic updates
+        ({ rootAuthor, rootPermlink } = deriveDiscussionRoot(post, parentAuthor, parentPermlink));
+      } catch (error) {
+        // Building the reply (metadata fetch, malformed parent post, …) failed —
+        // reset the sending flags so the reply editor isn't left permanently wedged.
+        this._isSubmitting = false;
+        this.setState({ isPostSending: false });
+        this._handleSubmitFailure(error);
+        return;
+      }
+
+      try {
+        // Add optimistic entry to discussions cache for immediate UI feedback
+        addOptimisticComment({
+          author,
+          permlink,
+          parentAuthor,
+          parentPermlink,
+          rootAuthor,
+          rootPermlink,
+          body: fields.body,
+          jsonMetadata,
+          authorReputation: currentAccount.reputation,
+        });
+
+        await commentMutation.mutateAsync({
+          author,
+          permlink,
+          parentAuthor,
+          parentPermlink,
+          title: '',
+          body: fields.body,
+          jsonMetadata,
+          rootAuthor,
+          rootPermlink,
+        });
+
+        AsyncStorage.setItem('temp-reply', '');
+        // Mark published BEFORE clearing the cache below, so a late autosave — the
+        // unmount save, or an image upload resolving after the editor closed —
+        // cannot re-create the entry we are about to delete and leave the comment
+        // box pre-filled with an already-published reply.
+        this._isPublished = true;
+        this._handleSubmitSuccess();
+
+        // delete quick comment draft cache if it exist (from replyCache)
+        if (replyCache && replyCache[draftId]) {
+          dispatch(deleteReplyCacheEntry(draftId));
+        }
+
+        this._isSubmitting = false;
+      } catch (error) {
+        // Roll back optimistic entry on failure
+        removeOptimisticComment(
+          author,
+          permlink,
+          rootAuthor,
+          rootPermlink,
+          parentAuthor,
+          parentPermlink,
+        );
+
+        this._isSubmitting = false;
+        this._handleSubmitFailure(error);
       }
     }
   };
 
-  _submitReply = async (fields) => {
-    const {
-      currentAccount,
-      pinCode,
-      dispatch,
-      userActivityMutation,
-      draftsCollection,
-      speakContentBuilder,
-    } = this.props;
-    const { isPostSending } = this.state;
+  _submitEdit = async (fields: any): Promise<any> => {
+    const { currentAccount, postCachePrimer, updateReplyMutation } = this.props;
+    const { post, isPostSending, thumbUrl, videoThumbs, isReply } = this.state;
 
     if (isPostSending) {
+      // `_handleSubmit` set `_isSubmitting=true` to gate the confirm Alert;
+      // bailing out here without clearing it would leave the editor wedged.
+      this._isSubmitting = false;
       return;
     }
 
-    if (currentAccount) {
-      this.setState({
-        isPostSending: true,
-      });
+    if (!currentAccount) {
+      this._isSubmitting = false;
+      return;
+    }
 
-      const { post } = this.state;
+    // Re-arm the synchronous guard at function top. For initial entry from
+    // `_handleSubmit`'s edit branch this is a no-op (already true). For
+    // recursive entry after a HiveAuth prompt this re-arms after the
+    // pre-await reset below — mirrors the `_submitReply` pattern so a
+    // dismissed-without-callback prompt sheet doesn't permanently wedge the
+    // publish button.
+    this._isSubmitting = true;
 
-      fields.body = speakContentBuilder.build(fields.body);
+    // Check if we should prompt for posting authority (HiveAuth users without authority)
+    if (shouldPromptPostingAuthority(currentAccount)) {
+      // Guard against infinite recursion
+      if (this._postingAuthorityPromptShown) {
+        console.warn('Posting authority prompt already shown, preventing recursion');
+        this.setState({ isPostSending: false });
+        this._isSubmitting = false;
+        return;
+      }
 
-      const _prefix = `re-${post.author.replace(/\./g, '')}`;
-      const permlink = generateUniquePermlink(_prefix);
+      this._postingAuthorityPromptShown = true;
+      this.setState({ isPostSending: false }); // Reset state before showing prompt
+      // Release the synchronous guard *before* the await. If the user
+      // dismisses the prompt sheet (swipe, app backgrounded, …) without
+      // triggering any of onGranted/onSkipped/onError, the promise stays
+      // pending forever — but with `_isSubmitting=false` the publish
+      // button is recoverable from the editor (tap publish again ↦
+      // `_handleSubmit` re-enters cleanly). The recursive call below
+      // re-arms the guard at function top.
+      this._isSubmitting = false;
 
-      const parentAuthor = post.author;
-      const parentPermlink = post.permlink;
-      const parentTags = post.json_metadata.tags;
-      const draftId = `${currentAccount.name}/${parentAuthor}/${parentPermlink}`; // different draftId for each user acount
-
-      const meta = await extractMetadata({
-        body: fields.body,
-        fetchRatios: true,
-        postType: PostTypes.COMMENT,
-      });
-      const jsonMetadata = makeJsonMetadata(meta, parentTags || ['ecency']);
-
-      await postComment(
-        currentAccount,
-        pinCode,
-        parentAuthor,
-        parentPermlink,
-        permlink,
-        fields.body,
-        jsonMetadata,
-      )
-        .then((response) => {
-          // record user activity for points
-          userActivityMutation.mutate({
-            pointsTy: PointActivityIds.COMMENT,
-            transactionId: response.id,
+      try {
+        await new Promise<void>((resolve, reject) => {
+          SheetManager.show(SheetNames.POSTING_AUTHORITY_PROMPT, {
+            payload: {
+              onGranted: () => resolve(),
+              onSkipped: () => resolve(),
+              onError: (error) => reject(error),
+            },
           });
-
-          AsyncStorage.setItem('temp-reply', '');
-          this._handleSubmitSuccess();
-
-          // create a cache entry
-          const author = currentAccount.name;
-          dispatch(
-            updateCommentCache(
-              `${author}/${permlink}`,
-              {
-                author,
-                permlink,
-                parent_author: parentAuthor,
-                parent_permlink: parentPermlink,
-                markdownBody: fields.body,
-              },
-              {
-                parentTags: parentTags || ['ecency'],
-              },
-            ),
-          );
-
-          // delete quick comment draft cache if it exist
-          if (draftsCollection && draftsCollection[draftId]) {
-            dispatch(deleteDraftCacheEntry(draftId));
-          }
-        })
-        .catch((error) => {
-          this._handleSubmitFailure(error);
         });
+
+        // Recursive call re-enters at function top (which re-arms
+        // `_isSubmitting`); eventually hits success/failure handlers.
+        return this._submitEdit(fields);
+      } catch (error) {
+        // Error granting posting authority - don't retry
+        console.warn('Failed to grant posting authority:', error);
+        // Reset state and abort (`_isSubmitting` already false from above).
+        this.setState({ isPostSending: false });
+        this._isSubmitting = false;
+        return;
+      } finally {
+        this._postingAuthorityPromptShown = false;
+      }
     }
-  };
 
-  _submitEdit = async (fields) => {
-    const { currentAccount, pinCode, dispatch, postCachePrimer, speakContentBuilder } = this.props;
-    const { post, isEdit, isPostSending, thumbUrl, isReply } = this.state;
-
-    if (isPostSending) {
-      return;
-    }
-
-    if (currentAccount) {
+    // Outer catch: route any error escaping the inner mutation try/catch
+    // (extractMetadata reject, createPatch / Buffer.from throw, post
+    // destructure failure on a malformed `post`, etc.) through
+    // _handleSubmitFailure so `_isSubmitting`, `isPostSending`, and the
+    // user-visible toast are all handled consistently. Without this, an
+    // early failure would leave the editor wedged on `_isSubmitting=true`
+    // until remount.
+    try {
       this.setState({
         isPostSending: true,
       });
-
-      // build speak video body
-      fields.body = speakContentBuilder.build(fields.body);
 
       const { tags, body, title } = fields;
       const {
@@ -958,12 +1606,20 @@ class EditorContainer extends Component<EditorContainerProps, any> {
 
       const meta = await extractMetadata({
         body: fields.body,
-        videoThumbUrls: speakContentBuilder.thumbUrlsRef.current,
         thumbUrl,
+        videoThumbUrls: collectVideoThumbUrls({ videoThumbs, body: fields.body }),
         fetchRatios: true,
         postType: jsonMetadata.type,
         contentType: jsonMetadata.content_type,
       });
+
+      // Merge any newly-disclosed flags over the post's existing ai_tools so an edit stays
+      // additive: makeJsonMetadataForUpdate shallow-merges `meta`, which would otherwise
+      // replace (drop) a prior disclosure the author isn't touching.
+      const aiTools = cleanAiTools({ ...(jsonMetadata?.ai_tools || {}), ...fields.aiTools });
+      if (aiTools) {
+        meta.ai_tools = aiTools;
+      }
 
       let jsonMeta = {};
 
@@ -974,82 +1630,100 @@ class EditorContainer extends Component<EditorContainerProps, any> {
         jsonMeta = makeJsonMetadata(meta, tags);
       }
 
-      await postContent(
-        currentAccount,
-        pinCode,
-        parentAuthor || '',
-        parentPermlink || '',
-        permlink,
-        title || '',
-        newBody,
-        jsonMeta,
-        null,
-        null,
-        isEdit,
-      )
-        .then(() => {
+      try {
+        if (isReply) {
+          // Use SDK updateReplyMutation for reply edits
           const author = currentAccount.name;
+          const { rootAuthor, rootPermlink } = deriveDiscussionRoot(
+            post,
+            parentAuthor,
+            parentPermlink,
+          );
+
+          await updateReplyMutation.mutateAsync({
+            author,
+            permlink,
+            parentAuthor: parentAuthor || '',
+            parentPermlink: parentPermlink || '',
+            title: '',
+            body: newBody,
+            jsonMetadata: jsonMeta,
+            rootAuthor,
+            rootPermlink,
+          });
+
+          // Update local cache for immediate UI feedback
+          postCachePrimer.cachePost({
+            ...post,
+            body,
+            json_metadata: jsonMeta,
+            markdownBody: body,
+            updated: new Date().toISOString(),
+          });
+
+          AsyncStorage.setItem('temp-reply', '');
           this._handleSubmitSuccess();
-          if (isReply) {
-            AsyncStorage.setItem('temp-reply', '');
-            dispatch(
-              updateCommentCache(
-                `${author}/${permlink}`,
-                {
-                  author,
-                  permlink,
-                  parent_author: parentAuthor,
-                  parent_permlink: parentPermlink,
-                  markdownBody: body,
-                  active_votes: post.active_votes,
-                  net_rshares: post.net_rshares,
-                  author_reputation: post.author_reputation,
-                  total_payout: post.total_payout,
-                  created: post.created,
-                  json_metadata: jsonMeta,
-                },
-                {
-                  isUpdate: true,
-                },
-              ),
-            );
-          } else {
-            // update post query data
-            postCachePrimer.cachePost({
-              ...post,
-              title,
-              body,
-              json_metadata: jsonMeta,
-              markdownBody: body,
-              updated: new Date().toISOString(),
-            });
-          }
-        })
-        .catch((error) => {
-          this._handleSubmitFailure(error);
-        });
+        } else {
+          // Use SDK comment mutation for post edits (non-reply). isUpdate keeps the SDK
+          // from recording a content activity: a comment op is identical on chain whether
+          // it publishes or edits, and makeJsonMetadataForUpdate deliberately keeps the
+          // original `app`, so without it an edit of a post published on another frontend
+          // earns post points and the daily quest tick here.
+          //
+          // Annotated rather than passed inline because `commentMutation` arrives through
+          // untyped props: an inline literal is not checked at all, so a misspelt isUpdate
+          // would typecheck clean and silently resume paying for edits.
+          const editPayload: CommentPayload = {
+            author: currentAccount.name,
+            permlink,
+            parentAuthor: parentAuthor || '',
+            parentPermlink: parentPermlink || '',
+            title: title || '',
+            body: newBody,
+            jsonMetadata: jsonMeta,
+            isUpdate: true,
+          };
+
+          await this.props.commentMutation.mutateAsync(editPayload);
+
+          this._handleSubmitSuccess();
+          // update post query data
+          postCachePrimer.cachePost({
+            ...post,
+            title,
+            body,
+            json_metadata: jsonMeta,
+            markdownBody: body,
+            updated: new Date().toISOString(),
+          });
+        }
+      } catch (error) {
+        this._handleSubmitFailure(error);
+      }
+    } catch (error) {
+      this._handleSubmitFailure(error);
     }
   };
 
-  _handleSubmitFailure = (error) => {
+  _handleSubmitFailure = (error: any) => {
     const { intl, dispatch } = this.props;
-    console.log(error);
-    if (
-      error &&
-      error.response &&
-      error.response.jse_shortmsg &&
-      error.response.jse_shortmsg.includes('wait to transact')
-    ) {
-      // when RC is not enough, offer boosting account
-      dispatch(setRcOffer(true));
-    } else if (error && error.jse_shortmsg && error.jse_shortmsg.includes('wait to transact')) {
-      // when RC is not enough, offer boosting account
+
+    const msg =
+      error && typeof error === 'object' && 'message' in error
+        ? (error as any).message
+        : typeof error === 'string'
+        ? error
+        : '';
+
+    this._isSubmitting = false;
+    if (isInsufficientRcError(error)) {
+      // out of RC: offer a top-up or a boost rather than a dead-end toast
       dispatch(setRcOffer(true));
     } else {
       // when other errors
       dispatch(
         toastNotification(
-          intl.formatMessage({ id: 'alert.something_wrong_msg' }, { message: error.message }),
+          intl.formatMessage({ id: 'alert.something_wrong_msg' }, { message: msg || '' }),
         ),
       );
     }
@@ -1065,6 +1739,8 @@ class EditorContainer extends Component<EditorContainerProps, any> {
   _handleSubmitSuccess = () => {
     const { navigation } = this.props;
 
+    this._isSubmitting = false;
+
     if (navigation) {
       navigation.goBack();
     }
@@ -1078,8 +1754,20 @@ class EditorContainer extends Component<EditorContainerProps, any> {
     const { intl } = this.props;
 
     if (isReply && !isEdit) {
+      // _submitReply has its own synchronous `_isSubmitting`/`isPostSending`
+      // guard; calling it directly means we must NOT set `_isSubmitting` here
+      // or that guard would trip on the very first tap and the reply would
+      // never submit.
       this._submitReply(form.fields);
     } else if (isEdit) {
+      // Synchronous reentry guard for the edit/new-post branches only. Those
+      // paths show a confirmation Alert before submitting, so without this a
+      // fast double-tap can enqueue two alerts (and two submissions). Cleared
+      // in the Alert "No" callbacks and in `_handleSubmitSuccess`/`_handleSubmitFailure`.
+      if (this._isSubmitting) {
+        return;
+      }
+      this._isSubmitting = true;
       Alert.alert(
         intl.formatMessage({
           id: 'editor.alert_pub_edit_title',
@@ -1092,7 +1780,9 @@ class EditorContainer extends Component<EditorContainerProps, any> {
             text: intl.formatMessage({
               id: 'editor.alert_btn_no',
             }),
-            onPress: () => console.log('Cancel Pressed'),
+            onPress: () => {
+              this._isSubmitting = false;
+            },
             style: 'cancel',
           },
           {
@@ -1105,6 +1795,11 @@ class EditorContainer extends Component<EditorContainerProps, any> {
         { cancelable: false },
       );
     } else {
+      // Same Alert-stacking guard as the edit branch above.
+      if (this._isSubmitting) {
+        return;
+      }
+      this._isSubmitting = true;
       Alert.alert(
         intl.formatMessage({
           id: 'editor.alert_pub_new_title',
@@ -1117,7 +1812,9 @@ class EditorContainer extends Component<EditorContainerProps, any> {
             text: intl.formatMessage({
               id: 'editor.alert_btn_no',
             }),
-            onPress: () => console.log('Cancel Pressed'),
+            onPress: () => {
+              this._isSubmitting = false;
+            },
             style: 'cancel',
           },
           {
@@ -1142,8 +1839,8 @@ class EditorContainer extends Component<EditorContainerProps, any> {
     }
   };
 
-  _handleSchedulePress = async (datePickerValue, fields) => {
-    const { currentAccount, pinCode, intl, dispatch } = this.props;
+  _handleSchedulePress = async (datePickerValue: any, fields: any) => {
+    const { currentAccount, intl, dispatch } = this.props;
 
     if (fields.title === '' || fields.body === '') {
       const timer = setTimeout(() => {
@@ -1164,32 +1861,37 @@ class EditorContainer extends Component<EditorContainerProps, any> {
 
       if (currentAccount && currentAccount.posting) {
         hasPostingPerm =
-          currentAccount.posting.account_auths.filter((x) => x[0] === 'ecency.app').length > 0;
+          currentAccount.posting.account_auths.filter((x: any) => x[0] === 'ecency.app').length > 0;
       }
 
       if (hasPostingPerm) {
         this._submitPost({ fields, scheduleDate: datePickerValue });
       } else {
-        await grantPostingPermission(json, pinCode, currentAccount)
-          .then(() => {
-            this._submitPost({ fields, scheduleDate: datePickerValue });
-          })
-          .catch((error) => {
-            dispatch(
-              toastNotification(
-                intl.formatMessage(
-                  { id: 'alert.something_wrong_msg' },
-                  { messsage: error.message },
-                ),
-              ),
-            );
+        try {
+          await this.props.grantPostingPermissionMutation.mutateAsync({
+            currentPosting: currentAccount.posting,
+            grantedAccount: 'ecency.app',
+            weightThreshold: currentAccount.posting.weight_threshold,
+            memoKey: currentAccount.memo_key,
+            jsonMetadata: json,
           });
+          this._submitPost({ fields, scheduleDate: datePickerValue });
+        } catch (error) {
+          dispatch(
+            toastNotification(
+              intl.formatMessage(
+                { id: 'alert.something_wrong_msg' },
+                { message: (error as any)?.message || '' },
+              ),
+            ),
+          );
+        }
       }
     }
   };
 
-  _setScheduledPost = (data) => {
-    const { dispatch, intl, currentAccount, navigation } = this.props;
+  _setScheduledPost = async (data: any) => {
+    const { dispatch, currentAccount, navigation, addScheduleMutation } = this.props;
     const { rewardType } = this.state;
 
     const options = makeOptions({
@@ -1199,40 +1901,37 @@ class EditorContainer extends Component<EditorContainerProps, any> {
       beneficiaries: data.beneficiaries,
     });
 
-    addSchedule(
-      data.permlink,
-      data.fields.title || '',
-      data.fields.body,
-      data.jsonMeta,
-      options,
-      data.scheduleDate,
-    )
-      .then(() => {
-        this.setState({
-          isPostSending: false,
-        });
-        dispatch(
-          toastNotification(
-            intl.formatMessage({
-              id: 'alert.success',
-            }),
-          ),
-        );
-
-        dispatch(deleteDraftCacheEntry(DEFAULT_USER_DRAFT_ID + currentAccount.name));
-
-        setTimeout(() => {
-          navigation.replace(ROUTES.SCREENS.DRAFTS, {
-            showSchedules: true,
-          });
-        }, 3000);
-      })
-      .catch((error) => {
-        console.warn('Failed to schedule post', error);
-        this.setState({
-          isPostSending: false,
-        });
+    try {
+      await addScheduleMutation.mutateAsync({
+        permlink: data.permlink,
+        title: data.fields.title || '',
+        body: data.fields.body,
+        meta: data.jsonMeta,
+        options,
+        schedule: data.scheduleDate,
+        reblog: false,
       });
+
+      this.setState({ isPostSending: false });
+      // Clear the synchronous submit guard now — the success path uses a
+      // 3 s setTimeout before navigating away, and we must not leave the
+      // editor wedged on `_isSubmitting=true` during that window.
+      this._isSubmitting = false;
+      dispatch(deleteDraftCacheEntry(DEFAULT_USER_DRAFT_ID + currentAccount.name));
+
+      setTimeout(() => {
+        navigation.replace(ROUTES.SCREENS.DRAFTS, {
+          showSchedules: true,
+        });
+      }, 3000);
+    } catch (error) {
+      console.warn('Failed to schedule post', error);
+      // Route through `_handleSubmitFailure` so the user actually sees a
+      // toast (the previous bare `console.warn` left scheduled-post failures
+      // silent) and so `_isSubmitting`/`isPostSending` reset consistently
+      // with every other failure path in this file.
+      this._handleSubmitFailure(error);
+    }
   };
 
   _initialEditor = () => {
@@ -1248,7 +1947,7 @@ class EditorContainer extends Component<EditorContainerProps, any> {
     });
   };
 
-  _handleRewardChange = (value) => {
+  _handleRewardChange = (value: any) => {
     this.setState({ rewardType: value });
   };
 
@@ -1268,6 +1967,17 @@ class EditorContainer extends Component<EditorContainerProps, any> {
     });
   };
 
+  // Thumbnails extracted from uploaded 3Speak videos are not present in the post body, keep
+  // them here so they can be offered as post thumbnail candidates. Keyed by embed url so a
+  // video removed from the body takes its thumbnail with it, see filterActiveVideoThumbs.
+  _handleVideoThumb = (embedUrl: string, thumbUrl: string) => {
+    this.setState((prevState: any) =>
+      prevState.videoThumbs.some((v: VideoThumb) => v.embedUrl === embedUrl)
+        ? null
+        : { videoThumbs: [...prevState.videoThumbs, { embedUrl, thumbUrl }] },
+    );
+  };
+
   _setIsUploading = (status: boolean) => {
     this.setState({
       isUploading: status,
@@ -1283,7 +1993,6 @@ class EditorContainer extends Component<EditorContainerProps, any> {
       isDraftSaving,
       draftId,
       isEdit,
-      isOpenCamera,
       isPostSending,
       isReply,
       quickReplyText,
@@ -1294,6 +2003,7 @@ class EditorContainer extends Component<EditorContainerProps, any> {
       sharedSnippetText,
       onLoadDraftPress,
       thumbUrl,
+      videoThumbs,
       uploadProgress,
       rewardType,
       postDescription,
@@ -1321,7 +2031,6 @@ class EditorContainer extends Component<EditorContainerProps, any> {
         isDraftSaving={isDraftSaving}
         isEdit={isEdit}
         isLoggedIn={isLoggedIn}
-        isOpenCamera={isOpenCamera}
         isPostSending={isPostSending}
         isReply={isReply}
         quickReplyText={quickReplyText}
@@ -1330,6 +2039,7 @@ class EditorContainer extends Component<EditorContainerProps, any> {
         updateDraftFields={this._updateDraftFields}
         saveCurrentDraft={this._saveCurrentDraft}
         saveDraftToDB={this._saveDraftToDB}
+        saveAsTemplate={this._saveAsTemplate}
         uploadedImage={uploadedImage}
         tags={tags}
         community={community}
@@ -1339,38 +2049,50 @@ class EditorContainer extends Component<EditorContainerProps, any> {
         onLoadDraftPress={onLoadDraftPress}
         thumbUrl={thumbUrl}
         setThumbUrl={this._handleSetThumbUrl}
+        videoThumbs={videoThumbs}
+        handleVideoThumb={this._handleVideoThumb}
         uploadProgress={uploadProgress}
         rewardType={rewardType}
         postDescription={postDescription}
         handlePostDescriptionChange={this._handlePostDescriptionChange}
         getBeneficiaries={this._extractBeneficiaries}
+        getPollDraft={this._extractPollDraft}
+        hasExplicitBeneficiaries={this._hasExplicitBeneficiaries()}
         setIsUploading={this._setIsUploading}
       />
     );
   }
 }
 
-const mapStateToProps = (state) => ({
-  currentAccount: state.account.currentAccount,
-  isDefaultFooter: state.account.isDefaultFooter,
-  isLoggedIn: state.application.isLoggedIn,
-  pinCode: state.application.pin,
+const mapStateToProps = (state: any) => ({
+  currentAccount: selectCurrentAccount(state),
+  isDefaultFooter: selectIsDefaultFooter(state),
+  isLoggedIn: selectIsLoggedIn(state),
+  pinCode: selectPin(state),
   beneficiariesMap: state.editor.beneficiariesMap,
   pollDraftsMap: state.editor.pollDraftsMap,
+  caretMap: state.editor.caretMap,
   defaultRewardType: state.editor.defaultRewardType,
   draftsCollection: state.cache.draftsCollection,
+  replyCache: state.cache.replyCache,
 });
 
-const mapQueriesToProps = () => ({
+const useEditorQueryProps = () => ({
   queryClient: useQueryClient(),
-  speakContentBuilder: speakQueries.useSpeakContentBuilder(),
-  speakMutations: speakQueries.useSpeakMutations(),
-  userActivityMutation: useUserActivityMutation(),
   postCachePrimer: usePostsCachePrimer(),
+  ...useCommentMutations(),
+  reblogMutation: useReblogMutation(),
+  grantPostingPermissionMutation: useGrantPostingPermissionMutation(),
+  addScheduleMutation: useAddScheduleMutation(),
+  // Deletes a published post's source draft, but only after the user confirms
+  // (see the publish-success prompt) — never silently. Best-effort: by the time
+  // it resolves the user has navigated away, so the failure toast is suppressed
+  // (a failed delete just leaves the draft, which reappears in the drafts list).
+  deleteDraftMutation: useDraftDeleteMutation({ showErrorToast: false }),
 });
 
 export default gestureHandlerRootHOC(
   connect(mapStateToProps)(
-    injectIntl((props) => <EditorContainer {...props} {...mapQueriesToProps()} />),
+    injectIntl((props) => <EditorContainer {...props} {...useEditorQueryProps()} />),
   ),
 );

@@ -21,6 +21,11 @@ export interface GlobalProps {
   quote: number;
   fundRecentClaims: number;
   fundRewardBalance: number;
+  votePowerReserveRate: number;
+  authorRewardCurve: string;
+  contentConstant: number;
+  currentHardforkVersion: string;
+  lastHardfork: number;
   hbdPrintRate: number;
 }
 export interface PrevLoggedInUsers {
@@ -28,11 +33,11 @@ export interface PrevLoggedInUsers {
   isLoggedOut: boolean;
 }
 interface AccountState {
-  isFetching: boolean;
+  isFetching: boolean | null;
   currentAccount: any;
   otherAccounts: any[];
   hasError: boolean;
-  errorMessage: string;
+  errorMessage: string | null;
   isLogingOut: boolean;
   globalProps: GlobalProps | null;
   prevLoggedInUsers: PrevLoggedInUsers[] | null;
@@ -49,7 +54,7 @@ const initialState: AccountState = {
   prevLoggedInUsers: [],
 };
 
-const accountReducer = (state = initialState, action) => {
+const accountReducer = (state = initialState, action: any) => {
   switch (action.type) {
     case FETCHING_ACCOUNT:
       return {

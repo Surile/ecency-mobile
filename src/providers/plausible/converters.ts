@@ -1,9 +1,4 @@
-import {
-  PostStats,
-  PostStatsByDimension,
-  StatsResponse,
-  StatsResponseResult,
-} from './plausible.types';
+import { PostStats, StatsResponse, StatsResponseResult } from './plausible.types';
 
 export const convertStatsData = (rawData: any) => {
   if (!rawData || !rawData.results) {
@@ -33,8 +28,14 @@ export const convertStatsData = (rawData: any) => {
 // NOTE: update default stats here along with accompanying interface
 // this will also update thre returned response object
 export function getDefaultPostStats(): PostStats {
+  // `visits` (sessions) is the displayed "Views" number, matching the web app:
+  // it is reload-proof (a single user refreshing inflates pageviews but not
+  // visits), so app and web report the same count. `pageviews` is still fetched
+  // for the per-device breakdown. parsePostStatsResponse maps by metric NAME,
+  // so adding a key here just requests + parses that extra metric.
   return {
     visitors: 0,
+    visits: 0,
     pageviews: 0,
     visit_duration: 0,
   } as PostStats;
@@ -86,15 +87,7 @@ export function parsePostStatsByDimension<T>(response: StatsResponse, dimensionK
       } as T),
   );
 
-  reData.sort((a, b) => (a.stats.pageviews > b.stats.pageviews ? -1 : 1));
+  reData.sort((a: any, b: any) => (a.stats.pageviews > b.stats.pageviews ? -1 : 1));
 
   return reData;
 }
-
-// Convert PostStatsByDimension to a new type based on T, where key is inferred from T
-export const convertStatsByDimension = <T>(data: PostStatsByDimension[]): T[] => {
-  // Get the key name from the first item of the type T
-  const key = Object.keys({} as T)[0] as keyof T;
-
-  return data.map((item) => ({ [key]: item.dimension, stats: item.stats } as T));
-};

@@ -1,9 +1,9 @@
-import React, { Fragment, useState, useMemo } from 'react';
+import React, { Fragment, useState, useMemo, useCallback, memo } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { useIntl } from 'react-intl';
 
-import { useDispatch } from 'react-redux';
 import EStyleSheet from 'react-native-extended-stylesheet';
+import { SheetManager } from 'react-native-actions-sheet';
 import { getTimeFromNow } from '../../../utils/time';
 import { delay } from '../../../utils/editor';
 // Constants
@@ -16,11 +16,14 @@ import { TextWithIcon } from '../../basicUIElements';
 // Styles
 import styles from './commentStyles';
 import { useAppSelector } from '../../../hooks';
-import { showReplyModal } from '../../../redux/actions/uiAction';
-import { PostTypes } from '../../../constants/postTypes';
+import { selectCurrentAccount, selectIsLoggedIn } from '../../../redux/selectors';
+
 import { UpvoteButton } from '../../postCard/children/upvoteButton';
 import { PostPoll } from '../../postPoll';
 import { ContentType } from '../../../providers/hive/hive.types';
+import { SheetNames } from '../../../navigation/sheets';
+import RootNavigation from '../../../navigation/rootNavigation';
+import ROUTES from '../../../constants/routeNames';
 
 const CommentView = ({
   avatarSize,
@@ -29,25 +32,27 @@ const CommentView = ({
   commentNumber,
   handleDeleteComment,
   handleOnEditPress,
-  handleOnLongPress,
+  handleOnMenuPress,
   handleOnUserPress,
   handleOnVotersPress,
   handleLinkPress,
   handleImagePress,
   handleYoutubePress,
   handleVideoPress,
-  mainAuthor = { mainAuthor },
+  isPinned,
+  mainAuthor = '',
   openReplyThread,
   repliesToggle,
   handleOnToggleReplies,
   onUpvotePress,
-}) => {
+  handleParaSelection,
+  onTagPress,
+  onAuthorPress,
+}: any) => {
   const intl = useIntl();
-  const dispatch = useDispatch();
 
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const isLoggedIn = useAppSelector((state) => state.application.isLoggedIn);
-  const isHideImage = useAppSelector((state) => state.application.hidePostsThumbnails);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
 
   const isMuted = useMemo(
     () => currentAccount.mutes?.indexOf(comment.author) > -1,
@@ -55,12 +60,24 @@ const CommentView = ({
   );
 
   const activeVotes = comment?.active_votes || [];
+  // hivemind stats.total_votes is the freshest authoritative count when present
+  // (it tracks optimistic up/unvotes), so it wins via ?? — a legit 0 (viewer
+  // removed the last vote) must NOT fall through to a stale net_votes. When stats
+  // is absent (custom waves feeds carry net_votes but no active_votes), take the
+  // larger of the live voter list and net_votes so an optimistic length-1
+  // active_votes array can't collapse the count (e.g. 29) to 1 until refetch.
+  // NOTE: this does not fix a stale persisted/un-refetched snapshot — tracked separately.
+  const _totalVotes =
+    comment.stats?.total_votes ??
+    (Math.max(activeVotes.length, comment.net_votes || 0) || comment.total_votes || 0);
+
   const [isOpeningReplies, setIsOpeningReplies] = useState(false);
 
   const childCount = comment.children;
   const { replies } = comment;
   const _depth = commentNumber || comment.level;
-  const _currentUsername = currentAccountUsername || currentAccount?.username;
+  const _currentUsername =
+    currentAccountUsername || currentAccount?.name || currentAccount?.username;
 
   const _showSubCommentsToggle = async (force = false) => {
     if (
@@ -77,17 +94,45 @@ const CommentView = ({
     }
   };
 
-  const _handleOnContentPress = () => {
-    openReplyThread(comment);
-  };
+  const _handleOnContentPress = useCallback(() => {
+    openReplyThread && openReplyThread(comment);
+  }, [openReplyThread, comment]);
 
-  const _handleOnReplyPress = () => {
+  const _handleOnReplyPress = useCallback(() => {
     if (isLoggedIn) {
-      dispatch(showReplyModal({ mode: 'comment', parentPost: comment }));
+      SheetManager.show(SheetNames.QUICK_POST, {
+        payload: {
+          mode: 'comment',
+          parentPost: comment,
+        },
+      });
     } else {
       console.log('Not LoggedIn');
     }
-  };
+  }, [isLoggedIn, comment]);
+
+  const _handleOnTipPress = useCallback(() => {
+    if (!isLoggedIn) {
+      console.log('Login required to send tips');
+      return;
+    }
+    SheetManager.show(SheetNames.TIPPING_DIALOG, {
+      payload: {
+        post: comment,
+      },
+    });
+  }, [isLoggedIn, comment]);
+
+  const _openProfilePage = useCallback((username: any) => {
+    if (!username) {
+      return;
+    }
+    RootNavigation.navigate({
+      name: ROUTES.SCREENS.PROFILE,
+      params: { username },
+      key: username,
+    });
+  }, []);
 
   const _renderReadMoreButton = () => (
     <TextWithIcon
@@ -103,23 +148,26 @@ const CommentView = ({
   );
 
   const _renderComment = () => {
-    const _hideContent = isMuted || comment.author_reputation < 25 || comment.net_rshares < 0;
+    const _hideContent = isMuted || comment?.isMuted;
 
     return (
-      <View style={[{ marginLeft: 2, marginTop: -6 }]}>
+      <View style={styles.commentBodyWrapper}>
         <CommentBody
           body={comment.body}
           metadata={comment.json_metadata}
+          author={comment.author}
+          permlink={comment.permlink}
           key={`key-${comment.permlink}`}
           hideContent={_hideContent}
           commentDepth={_depth}
-          handleOnContentPress={_handleOnContentPress}
           handleOnUserPress={handleOnUserPress}
-          handleOnLongPress={() => handleOnLongPress(comment)}
           handleLinkPress={handleLinkPress}
           handleImagePress={handleImagePress}
           handleVideoPress={handleVideoPress}
           handleYoutubePress={handleYoutubePress}
+          handleParaSelection={handleParaSelection}
+          handleOnContentPress={_handleOnContentPress}
+          onTagPress={onTagPress}
         />
 
         {comment.json_metadata.content_type === ContentType.POLL && (
@@ -144,9 +192,7 @@ const CommentView = ({
       <>
         <UpvoteButton
           content={comment}
-          activeVotes={activeVotes}
           isShowPayoutValue={true}
-          parentType={PostTypes.COMMENT}
           onUpvotePress={(sourceRef, onVotingStart) => {
             onUpvotePress({ content: comment, sourceRef, onVotingStart });
           }}
@@ -159,26 +205,92 @@ const CommentView = ({
           iconSize={20}
           wrapperStyle={styles.leftButton}
           iconType="MaterialCommunityIcons"
-          isClickable
+          isClickable={_totalVotes > 0}
           onPress={() =>
-            handleOnVotersPress &&
-            activeVotes.length > 0 &&
-            handleOnVotersPress(activeVotes, comment)
+            handleOnVotersPress && _totalVotes > 0 && handleOnVotersPress(activeVotes, comment)
           }
-          text={activeVotes.length}
+          text={_totalVotes}
           textStyle={styles.voteCountText}
+          accessibilityLabel={intl.formatMessage(
+            {
+              id: 'post.a11y_votes',
+              defaultMessage: '{count, plural, one {# vote} other {# votes}}',
+            },
+            { count: _totalVotes || 0 },
+          )}
+          accessibilityHint={
+            _totalVotes > 0
+              ? intl.formatMessage({
+                  id: 'post.a11y_voters_hint',
+                  defaultMessage: 'View voters',
+                })
+              : undefined
+          }
         />
 
-        {isLoggedIn && (
-          <IconButton
-            size={20}
-            iconStyle={styles.leftIcon}
-            style={styles.leftButton}
-            name="comment-outline"
-            onPress={_handleOnReplyPress}
-            iconType="MaterialCommunityIcons"
-          />
-        )}
+        <TextWithIcon
+          iconName="comment-outline"
+          iconSize={20}
+          wrapperStyle={styles.leftButton}
+          iconType="MaterialCommunityIcons"
+          isClickable={isLoggedIn}
+          onPress={_handleOnReplyPress}
+          text={childCount || 0}
+          textStyle={styles.voteCountText}
+          accessibilityLabel={intl.formatMessage(
+            {
+              id: 'post.a11y_comments',
+              defaultMessage: '{count, plural, one {# comment} other {# comments}}',
+            },
+            { count: childCount || 0 },
+          )}
+          accessibilityHint={intl.formatMessage({
+            id: 'post.a11y_reply_hint',
+            defaultMessage: 'Reply',
+          })}
+        />
+
+        {isLoggedIn &&
+          // Only the waves feed carries a tip_count; show the count + an
+          // already-tipped (solid gift) state there. Elsewhere (regular comment
+          // threads, where the field is absent) keep the plain icon-only action
+          // instead of rendering a misleading "0".
+          (typeof comment.tip_count === 'number' ? (
+            <TextWithIcon
+              iconName={comment.tipped_by_viewer ? 'gift' : 'gift-outline'}
+              iconSize={20}
+              wrapperStyle={styles.leftButton}
+              iconType="MaterialCommunityIcons"
+              isClickable
+              onPress={_handleOnTipPress}
+              text={comment.tip_count}
+              textStyle={styles.voteCountText}
+              accessibilityLabel={intl.formatMessage(
+                {
+                  id: 'post.a11y_tips',
+                  defaultMessage: '{count, plural, one {# tip} other {# tips}}',
+                },
+                { count: comment.tip_count },
+              )}
+              accessibilityHint={intl.formatMessage({
+                id: 'post.a11y_tip',
+                defaultMessage: 'Send tip',
+              })}
+            />
+          ) : (
+            <IconButton
+              size={20}
+              iconStyle={styles.leftIcon}
+              style={styles.leftButton}
+              name="gift-outline"
+              onPress={_handleOnTipPress}
+              iconType="MaterialCommunityIcons"
+              accessibilityLabel={intl.formatMessage({
+                id: 'post.a11y_tip',
+                defaultMessage: 'Send tip',
+              })}
+            />
+          ))}
 
         {_currentUsername === comment.author && (
           <Fragment>
@@ -189,15 +301,31 @@ const CommentView = ({
               name="create"
               onPress={() => handleOnEditPress && handleOnEditPress(comment)}
               iconType="MaterialIcons"
+              accessibilityLabel={intl.formatMessage({
+                id: 'post.a11y_edit',
+                defaultMessage: 'Edit comment',
+              })}
             />
-            {!childCount && !activeVotes.length && comment.isDeletable && (
+            {!childCount && !_totalVotes && comment.isDeletable && (
               <IconButton
                 size={20}
                 iconStyle={styles.leftIcon}
                 style={styles.leftButton}
                 name="delete-forever"
-                onPress={() => handleDeleteComment(comment.permlink, comment.parent_permlink)}
+                onPress={() =>
+                  handleDeleteComment(
+                    comment.permlink,
+                    comment.parent_permlink,
+                    comment.parent_author,
+                    comment.root_author,
+                    comment.root_permlink,
+                  )
+                }
                 iconType="MaterialIcons"
+                accessibilityLabel={intl.formatMessage({
+                  id: 'post.a11y_delete',
+                  defaultMessage: 'Delete comment',
+                })}
               />
             )}
           </Fragment>
@@ -207,7 +335,7 @@ const CommentView = ({
           <View style={styles.rightButtonWrapper}>
             {isOpeningReplies ? (
               <ActivityIndicator
-                style={{ paddingHorizontal: 24, paddingBottom: 8 }}
+                style={styles.activityIndicator}
                 size="small"
                 color={EStyleSheet.value('$iconColor')}
               />
@@ -215,13 +343,16 @@ const CommentView = ({
               <TextWithIcon
                 wrapperStyle={styles.rightButton}
                 iconName={repliesToggle ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
-                textStyle={styles.moreText}
                 iconType="MaterialIcons"
                 isClickable
-                iconStyle={styles.iconStyle}
+                iconStyle={styles.chevronIcon}
                 iconSize={16}
                 onPress={() => _showSubCommentsToggle()}
-                text={`${childCount} ${intl.formatMessage({ id: 'comments.more_replies' })}`}
+                text=""
+                accessibilityLabel={intl.formatMessage({
+                  id: repliesToggle ? 'post.a11y_hide_replies' : 'post.a11y_show_replies',
+                  defaultMessage: repliesToggle ? 'Hide replies' : 'Show replies',
+                })}
               />
             )}
           </View>
@@ -230,13 +361,24 @@ const CommentView = ({
     );
   };
 
-  const customContainerStyle =
-    _depth > 1
-      ? {
-          paddingLeft: (_depth - 2) * 44,
-          backgroundColor: EStyleSheet.value('$primaryLightBackground'),
-        }
-      : null;
+  const customContainerStyle = useMemo(
+    () =>
+      _depth > 1
+        ? {
+            paddingLeft: (_depth - 2) * 44,
+            backgroundColor: EStyleSheet.value('$primaryLightBackground'),
+          }
+        : null,
+    [_depth],
+  );
+
+  // Show the Ecency source badge when the wave/comment was published from an
+  // Ecency client (e.g. ecency/x-vision, ecency.waves, ecency-mobile). Mirrors
+  // the web wave badge; only an explicit "ecency" app matches (not a missing app).
+  const isFromEcency = String(comment.json_metadata?.app || '')
+    .split('/')[0]
+    .toLowerCase()
+    .includes('ecency');
 
   return (
     <Fragment key={comment.permlink}>
@@ -248,12 +390,15 @@ const CommentView = ({
           size={avatarSize || 40}
           currentAccountUsername={_currentUsername}
           isShowOwnerIndicator={mainAuthor === comment.author}
-          isHideImage={isHideImage}
+          isShowPinnedIndicator={isPinned}
+          isShowPromotedIndicator={comment.is_promoted}
           inlineTime={true}
+          isFromEcency={isFromEcency}
           customStyle={{ alignItems: 'flex-start', paddingLeft: 12 }}
           showDotMenuButton={true}
-          handleOnDotPress={() => handleOnLongPress(comment)}
-          profileOnPress={handleOnUserPress}
+          handleOnDotPress={() => handleOnMenuPress(comment)}
+          avatarOnPress={onAuthorPress || handleOnUserPress}
+          profileOnPress={onAuthorPress || _openProfilePage}
           secondaryContentComponent={_renderComment()}
         />
       </View>
@@ -261,4 +406,17 @@ const CommentView = ({
   );
 };
 
-export default CommentView;
+// NOTE: If new props are added that affect rendering, they must be included here.
+// Callback props (handleOnEditPress, onUpvotePress, etc.) are excluded because parents
+// should memoize them. The `comment` object is compared by reference — all upstream
+// producers (restructureData, optimistic updates) create new objects for changed comments.
+export default memo(CommentView, (prev, next) => {
+  return (
+    prev.comment === next.comment &&
+    prev.repliesToggle === next.repliesToggle &&
+    prev.commentNumber === next.commentNumber &&
+    prev.isPinned === next.isPinned &&
+    prev.mainAuthor === next.mainAuthor &&
+    prev.currentAccountUsername === next.currentAccountUsername
+  );
+});

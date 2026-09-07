@@ -1,17 +1,19 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useState, useEffect } from 'react';
 import { useIntl } from 'react-intl';
-import { Text, Image, View, SafeAreaView, TouchableOpacity } from 'react-native';
+import { Text, Image, View, TouchableOpacity } from 'react-native';
 
 import EStyleSheet from 'react-native-extended-stylesheet';
 import { gestureHandlerRootHOC, ScrollView } from 'react-native-gesture-handler';
 import VersionNumber from 'react-native-version-number';
 
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { CheckBox, Icon, MainButton } from '../../../components';
 import { ECENCY_TERMS_URL } from '../../../config/ecencyApi';
 import ROUTES from '../../../constants/routeNames';
 import { useAppDispatch, useAppSelector } from '../../../hooks';
 import { setLastAppVersion, setIsTermsAccepted } from '../../../redux/actions/applicationActions';
+import { selectIsTermsAccepted } from '../../../redux/selectors';
 import LaunchScreen from '../../launch';
 
 import styles from '../children/WelcomeScreenStyles';
@@ -20,13 +22,13 @@ const WelcomeScreen = () => {
   // NOTE: I have no logical explanation for this, but only this solution
   // makes sure first screen is renderd from stack, otherwise it's always
   // blank white screen no matter what we try.
-  require('@esteemapp/dhive');
+  require('@ecency/sdk');
 
   const intl = useIntl();
   const navigation = useNavigation();
   const dispatch = useAppDispatch();
 
-  const isTermsAccepted = useAppSelector((state) => state.application.isTermsAccepted);
+  const isTermsAccepted = useAppSelector(selectIsTermsAccepted);
   const [showAnimation, setShowAnimation] = useState(true);
   const [isConsentChecked, setIsConsentChecked] = useState(isTermsAccepted);
   const [appVersion] = useState(VersionNumber.appVersion);
@@ -49,7 +51,7 @@ const WelcomeScreen = () => {
     navigation.navigate(ROUTES.STACK.MAIN);
   };
 
-  const _onCheckPress = (value, isCheck) => {
+  const _onCheckPress = (value: any, isCheck: any) => {
     setIsConsentChecked(isCheck);
   };
 
@@ -64,7 +66,7 @@ const WelcomeScreen = () => {
     });
   };
 
-  const _renderInfo = (iconName, headingIntlId, bodyIntlId) => (
+  const _renderInfo = (iconName: any, headingIntlId: any, bodyIntlId: any) => (
     <View style={styles.sectionRow}>
       <Icon
         iconType="SimpleLineIcons"

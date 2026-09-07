@@ -1,11 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { Image, Text, View } from 'react-native';
-import { useDispatch, useSelector } from 'react-redux';
+import { useDispatch } from 'react-redux';
 import { useIntl } from 'react-intl';
+import { SheetManager } from 'react-native-actions-sheet';
 import styles from '../styles/ProposalVoteRequest.styles';
 import { TextButton } from '../../buttons';
 import { MainButton } from '../../mainButton';
-import { showActionModal } from '../../../redux/actions/uiAction';
 import { ButtonTypes } from '../../actionModal/container/actionModalContainer';
 import {
   useActiveProposalMetaQuery,
@@ -13,6 +13,9 @@ import {
   useProposalVoteMutation,
 } from '../../../providers/queries';
 import { updateProposalVoteMeta } from '../../../redux/actions/cacheActions';
+import { SheetNames } from '../../../navigation/sheets';
+import { selectIsLoggedIn, selectCurrentAccount } from '../../../redux/selectors';
+import { useAppSelector } from '../../../hooks';
 
 const RE_REQUEST_INTERVAL = 259200000; // 3 days;
 
@@ -24,28 +27,47 @@ export const ProposalVoteRequest = () => {
   const activeProposalMetaQuery = useActiveProposalMetaQuery();
   const _ecencyProposalId = activeProposalMetaQuery.data?.id;
 
-  // make sure proposalVotedQuery returnes updated data on id change
+  // make sure proposalVotedQuery returns updated data on id change
   const proposalVotedQuery = useProposalVotedQuery(_ecencyProposalId);
   const proposalVoteMutation = useProposalVoteMutation();
 
-  const currentAccount = useSelector((state) => state.account.currentAccount);
-  const isLoggedIn = useSelector((state) => state.application.isLoggedIn);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
 
-  // assess if user should be promopted to vote proposal
-  // makes sure this logic is only calculated once on launch
-  const [skipOnLaunch] = useState(
-    !isLoggedIn || proposalVotedQuery.data || proposalVotedQuery.meta?.processed,
-  );
+  // reset mutation state when account changes so stale vote status
+  // from a previous account does not carry over
+  const prevUsernameRef = useRef(currentAccount?.name);
+  useEffect(() => {
+    if (prevUsernameRef.current !== currentAccount?.name) {
+      prevUsernameRef.current = currentAccount?.name;
+      proposalVoteMutation.reset();
+    }
+  }, [currentAccount?.name]);
 
-  // render or no render based on dimiss action performed
+  // reactively assess if widget should be skipped;
+  // recalculates when account data, vote status, or dismiss meta changes
   const skipRender = useMemo(() => {
-    if (!skipOnLaunch && proposalVotedQuery.meta) {
+    if (!isLoggedIn) return true;
+    // Keep the banner mounted right after a successful vote so the
+    // "thank you" state can render this session; meta.processed hides it
+    // on subsequent launches.
+    if (proposalVoteMutation.isSuccess) return false;
+    if (!_ecencyProposalId) return true;
+    if (proposalVotedQuery.data) return true;
+    if (proposalVotedQuery.meta?.processed) return true;
+    if (proposalVotedQuery.meta) {
       const curTime = new Date().getTime();
       const nextRequestTime = proposalVotedQuery.meta.dismissedAt + RE_REQUEST_INTERVAL;
-      return nextRequestTime > curTime;
+      if (nextRequestTime > curTime) return true;
     }
-    return skipOnLaunch;
-  }, [proposalVotedQuery.meta]);
+    return false;
+  }, [
+    isLoggedIn,
+    _ecencyProposalId,
+    proposalVotedQuery.data,
+    proposalVotedQuery.meta,
+    proposalVoteMutation.isSuccess,
+  ]);
 
   if (skipRender) {
     return null;
@@ -54,45 +76,40 @@ export const ProposalVoteRequest = () => {
   const voteCasted = proposalVoteMutation.isSuccess;
 
   const _voteAction = () => {
-    proposalVoteMutation.mutate({ proposalId: _ecencyProposalId });
+    proposalVoteMutation.mutate({ proposalId: _ecencyProposalId } as any);
   };
 
-  const _remindLater = () => {
-    dispatch(
-      showActionModal({
+  const _remindLater = async () => {
+    if (!_ecencyProposalId || !currentAccount?.name) {
+      return null;
+    }
+
+    const action = await SheetManager.show(SheetNames.ACTION_MODAL, {
+      payload: {
         title: intl.formatMessage({ id: 'proposal.title-action-dismiss' }), // "Dismiss Vote Request",
         buttons: [
           {
             text: intl.formatMessage({ id: 'proposal.btn-ignore' }),
             type: ButtonTypes.CANCEL,
-            onPress: () => {
-              console.log('Ignore');
-              dispatch(
-                updateProposalVoteMeta(
-                  _ecencyProposalId,
-                  currentAccount.username,
-                  true,
-                  new Date().getTime(),
-                ),
-              );
-            },
+            returnValue: 'ignore',
           },
           {
             text: intl.formatMessage({ id: 'proposal.btn-later' }),
-            onPress: () => {
-              dispatch(
-                updateProposalVoteMeta(
-                  _ecencyProposalId,
-                  currentAccount.username,
-                  false,
-                  new Date().getTime(),
-                ),
-              );
-            },
+            returnValue: 'later',
           },
         ],
-      }),
-    );
+      },
+    });
+
+    if (action === 'ignore') {
+      dispatch(
+        updateProposalVoteMeta(_ecencyProposalId, currentAccount.name, true, new Date().getTime()),
+      );
+    } else if (action === 'later') {
+      dispatch(
+        updateProposalVoteMeta(_ecencyProposalId, currentAccount.name, false, new Date().getTime()),
+      );
+    }
   };
 
   const _actionPanel = () => {
@@ -103,7 +120,7 @@ export const ProposalVoteRequest = () => {
           style={{ height: 40 }}
           textStyle={styles.voteBtnTitle}
           text={intl.formatMessage({ id: 'proposal.btn-vote' })}
-          isLoading={proposalVoteMutation.isLoading}
+          isLoading={proposalVoteMutation.isPending}
         />
         <TextButton
           onPress={_remindLater}

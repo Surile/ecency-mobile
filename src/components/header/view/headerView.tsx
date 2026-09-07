@@ -1,12 +1,12 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { View, Text, TouchableOpacity } from 'react-native';
-import LinearGradient from 'react-native-linear-gradient';
+import { LinearGradient } from 'expo-linear-gradient';
+
 import { useIntl } from 'react-intl';
 
 // Components
 import { useNavigation } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { SearchModal } from '../../searchModal';
 import { IconButton } from '../../iconButton';
 import { UserAvatar } from '../../userAvatar';
 
@@ -31,18 +31,12 @@ const HeaderView = ({
   hideUser,
   showQR,
   showBoost,
-}) => {
+  hideSearch,
+}: any) => {
   const navigation = useNavigation();
 
-  const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
   const intl = useIntl();
-  let gradientColor;
-
-  if (isReverse) {
-    gradientColor = isDarkTheme ? ['#43638e', '#081c36'] : ['#357ce6', '#2d5aa0'];
-  } else {
-    gradientColor = isDarkTheme ? ['#081c36', '#43638e'] : ['#2d5aa0', '#357ce6'];
-  }
+  const gradientColor = isDarkTheme ? ['#081c36', '#43638e'] : ['#2d5aa0', '#357ce6'];
 
   const _onPressSearchButton = () => {
     navigation.navigate(ROUTES.SCREENS.SEARCH_RESULT);
@@ -53,7 +47,7 @@ const HeaderView = ({
       <LinearGradient
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 0 }}
-        colors={gradientColor}
+        colors={(isReverse ? gradientColor.reverse() : gradientColor) as any}
         style={[
           styles.avatarButtonWrapper,
           isReverse ? styles.avatarButtonWrapperReverse : styles.avatarDefault,
@@ -118,7 +112,9 @@ const HeaderView = ({
               onPress={handleOnQRPress}
             />
           )}
-          <IconButton iconStyle={styles.backIcon} name="search" onPress={_onPressSearchButton} />
+          {!hideSearch && (
+            <IconButton iconStyle={styles.backIcon} name="search" onPress={_onPressSearchButton} />
+          )}
 
           {showBoost && isLoggedIn && (
             <IconButton
@@ -138,14 +134,6 @@ const HeaderView = ({
     <SafeAreaView edges={['top']} style={[styles.container, isReverse && styles.containerReverse]}>
       {!hideUser && (
         <>
-          <SearchModal
-            placeholder={intl.formatMessage({
-              id: 'header.search',
-            })}
-            isOpen={isSearchModalOpen}
-            handleOnClose={() => setIsSearchModalOpen(false)}
-          />
-
           {_renderAvatar()}
           {_renderTitle()}
         </>

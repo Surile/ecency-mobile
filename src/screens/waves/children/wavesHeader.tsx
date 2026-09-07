@@ -1,23 +1,26 @@
 import React from 'react';
-import { View, Text } from 'react-native';
-import { useDispatch } from 'react-redux';
-import { useIntl } from 'react-intl';
-import { WritePostButton } from '../../../components/atoms';
-import { showReplyModal } from '../../../redux/actions/uiAction';
+import { View, Text, TouchableOpacity } from 'react-native';
+import { Icon } from '../../../components/icon';
 import styles from '../styles/children.styles';
 
-export const WavesHeader = () => {
-  const dispatch = useDispatch();
-  const intl = useIntl();
+export type WavesFeedType = 'for-you' | 'following';
 
-  const _onPress = () => {
-    dispatch(showReplyModal({ mode: 'wave' }));
-  };
+interface WavesHeaderProps {
+  activeTag: string | null;
+  onClearTag: () => void;
+}
+
+export const WavesHeader = ({ activeTag, onClearTag }: WavesHeaderProps) => {
+  if (!activeTag) {
+    return null;
+  }
 
   return (
-    <View style={styles.headerContainer}>
-      <Text style={styles.headerTitle}>{intl.formatMessage({ id: 'post.ecency_waves' })}</Text>
-      <WritePostButton placeholderId="quick_reply.placeholder_wave" onPress={_onPress} />
+    <View style={styles.tagChipRow}>
+      <TouchableOpacity style={styles.tagChip} onPress={onClearTag}>
+        <Text style={styles.tagChipText}>#{activeTag}</Text>
+        <Icon iconType="MaterialIcons" name="close" size={16} style={styles.tagChipClose} />
+      </TouchableOpacity>
     </View>
   );
 };

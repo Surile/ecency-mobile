@@ -7,72 +7,97 @@ import styles from './children.styles';
 import { Icon } from '../../../components/index';
 
 interface CoinBasicsProps {
-  assetId: string;
   valuePairs: DataPair[];
   extraData: DataPair[];
   coinSymbol: string;
-  percentChange: number;
+  apr?: number;
   iconUrl?: string;
   isEngine: boolean;
   isRenderChart?: boolean;
   showChart: boolean;
   setShowChart: (value: boolean) => void;
   onInfoPress: (id: string) => void;
+  onAnalyticsPress?: () => void;
 }
 
 export const CoinBasics = ({
-  assetId,
   valuePairs,
   extraData,
   coinSymbol,
-  percentChange,
+  apr,
   iconUrl,
   isEngine,
   isRenderChart,
   showChart,
   setShowChart,
   onInfoPress,
+  onAnalyticsPress,
 }: CoinBasicsProps) => {
   const intl = useIntl();
   const _renderCoinHeader = (
     <>
       <View style={styles.coinTitleContainer}>
         <AssetIcon
-          id={assetId}
           iconUrl={iconUrl}
           iconSize={40}
           containerStyle={styles.iconContainer}
           isEngine={isEngine}
         />
         <Text style={styles.textCoinTitle}>{coinSymbol}</Text>
+        {onAnalyticsPress && (
+          <TouchableOpacity
+            onPress={onAnalyticsPress}
+            style={styles.analyticsIcon}
+            accessibilityLabel={intl.formatMessage({ id: 'wallet.openAnalytics' })}
+          >
+            <Icon
+              iconType="MaterialCommunityIcons"
+              name="chart-line"
+              style={styles.analyticsChartIcon}
+              size={22}
+            />
+          </TouchableOpacity>
+        )}
       </View>
-      <TouchableOpacity style={styles.percentEyeContainer} onPress={() => setShowChart(!showChart)}>
-        {percentChange ? (
-          <Text style={styles.textHeaderChange}>
-            {intl.formatMessage({ id: 'wallet.change' })}
-            <Text style={percentChange > 0 ? styles.textPositive : styles.textNegative}>
-              {percentChange
-                ? ` ${percentChange >= 0 ? '+' : ''}${percentChange.toFixed(1)}%`
-                : ' ---'}
-            </Text>
-          </Text>
-        ) : (
-          <View style={styles.textHeaderChange} />
-        )}
-        {!!isRenderChart && (
-          <Icon
-            iconType="Ionicons"
-            name={showChart ? 'eye' : 'eye-off'}
-            style={styles.eyeIcon}
-            size={20}
-          />
-        )}
-      </TouchableOpacity>
+      <View style={styles.percentEyeContainer}>
+        <TouchableOpacity
+          disabled={!isRenderChart}
+          onPress={() => {
+            if (!isRenderChart) return;
+            setShowChart(!showChart);
+          }}
+          accessibilityLabel={
+            isRenderChart
+              ? intl.formatMessage({
+                  id: showChart ? 'wallet.hideChart' : 'wallet.showChart',
+                })
+              : undefined
+          }
+        >
+          <View style={styles.percentEyeContainer}>
+            {apr !== undefined && apr !== null ? (
+              <Text style={styles.textHeaderApr}>
+                {intl.formatMessage({ id: 'wallet.apr' })} {apr.toFixed(apr < 10 ? 3 : 2)}%
+              </Text>
+            ) : (
+              <View style={styles.textHeaderApr} />
+            )}
+            {!!isRenderChart && (
+              <Icon
+                iconType="Ionicons"
+                name={showChart ? 'eye' : 'eye-off'}
+                style={styles.eyeIcon}
+                size={20}
+              />
+            )}
+          </View>
+        </TouchableOpacity>
+      </View>
     </>
   );
 
   const _renderValuePair = (args: DataPair, index: number) => {
-    const label = intl.formatMessage({ id: `wallet.${args.dataKey}` });
+    const label = intl.formatMessage({ id: `wallet.${(args as any).dataKey}` });
     return (
       <Fragment key={`basic-data-${args.dataKey}-${index}`}>
         <Text style={styles.textBasicValue}>{args.value}</Text>
@@ -83,7 +108,7 @@ export const CoinBasics = ({
 
   const _renderExtraData = (args: DataPair, index: number) => {
     const label = intl.formatMessage(
-      { id: `wallet.${args.dataKey || args.labelId}` },
+      { id: `wallet.${(args as any).dataKey || (args as any).labelId}` },
       args.subValue ? { subValue: args.subValue } : undefined,
     );
 
@@ -95,11 +120,14 @@ export const CoinBasics = ({
       <View key={`extra-data-${args.dataKey}-${index}`} style={styles.extraDataContainer}>
         <Text
           style={[styles.textExtraLabel, args.isClickable && styles.textUnderline]}
-          onPress={args.isClickable && _onPress}
+          onPress={((args as any).isClickable && _onPress) as any}
         >
           {label}
         </Text>
-        <Text style={styles.textExtraValue} onPress={args.isClickable && _onPress}>
+        <Text
+          style={styles.textExtraValue}
+          onPress={((args as any).isClickable && _onPress) as any}
+        >
           {args.value}
         </Text>
       </View>

@@ -1,39 +1,21 @@
 import get from 'lodash/get';
-import { operationOrders } from '@hiveio/dhive/lib/utils';
-import { SpkApiWallet } from 'providers/hive-spk/hiveSpk.types';
+import {
+  getQueryClient,
+  getAccountsQueryOptions,
+  getConversionRequestsQueryOptions,
+  getDynamicPropsQueryOptions,
+  getOpenOrdersQueryOptions,
+  getSavingsWithdrawFromQueryOptions,
+  getCurrencyTokenRate,
+} from '@ecency/sdk';
 import parseDate from './parseDate';
 import parseToken from './parseToken';
 import { vestsToHp } from './conversions';
-import {
-  getAccount,
-  getAccountHistory,
-  getConversionRequests,
-  getFeedHistory,
-  getOpenOrders,
-  getSavingsWithdrawFrom,
-} from '../providers/hive/dhive';
-import { getCurrencyTokenRate, getPortfolio } from '../providers/ecency/ecency';
-import { CoinActivity, CoinData, DataPair } from '../redux/reducers/walletReducer';
-import { GlobalProps } from '../redux/reducers/accountReducer';
-import { getEstimatedAmount } from './vote';
-import { getPointsHistory } from '../providers/ecency/ePoint';
-// Constant
-import POINTS from '../constants/options/points';
-import DEFAULT_ASSETS, { ASSET_IDS } from '../constants/defaultAssets';
+import { CoinActivity } from '../redux/reducers/walletReducer';
 
-import parseAsset from './parseAsset';
-import { fetchEngineAccountHistory } from '../providers/hive-engine/hiveEngine';
-import {
-  EngineActions,
-  EngineOperations,
-  HistoryItem,
-  HiveEngineToken,
-} from '../providers/hive-engine/hiveEngine.types';
-import { ClaimsCollection } from '../redux/reducers/cacheReducer';
-import TransferTypes from '../constants/transferTypes';
-import { getHoursDifferntial } from './time';
+import { EngineOperations, HistoryItem } from '../providers/hive-engine/hiveEngine.types';
 import { RepeatableTransfers } from '../constants/repeatableTransfers';
-import { convertLatestQuotes } from '../providers/ecency/converters';
+import { resolveTrxId } from './transactionExplorer';
 
 export const transferTypes = [
   'curation_reward',
@@ -41,6 +23,8 @@ export const transferTypes = [
   'comment_benefactor_reward',
   'claim_reward_balance',
   'transfer',
+  'recurrent_transfer',
+  'fill_recurrent_transfer',
   'transfer_to_savings',
   'transfer_from_savings',
   'transfer_to_vesting',
@@ -57,50 +41,44 @@ export const transferTypes = [
   'fill_vesting_withdraw',
 ];
 
-const ECENCY_ACTIONS = ['dropdown_transfer', 'dropdown_promote', 'dropdown_boost'];
-const HIVE_ACTIONS = [
-  'transfer_token',
-  'transfer_to_savings',
-  'transfer_to_vesting',
-  'withdraw_hive',
-  'swap_token',
-  TransferTypes.RECURRENT_TRANSFER,
-];
-const HBD_ACTIONS = [
-  'transfer_token',
-  'transfer_to_savings',
-  'convert',
-  'withdraw_hbd',
-  'swap_token',
-];
-const HIVE_POWER_ACTIONS = ['delegate', 'power_down'];
-
-export const groomingTransactionData = (transaction, hivePerMVests): CoinActivity | null => {
-  if (!transaction || !hivePerMVests) {
+export const groomingTransactionData = (
+  transaction: any,
+  hivePerMVests: number | null,
+): CoinActivity | null => {
+  if (!transaction) {
     return null;
   }
 
+  const vestsToHpRate = hivePerMVests || 0;
+  const isLegacy = Array.isArray(transaction);
+  const opType = isLegacy ? transaction[1]?.op?.[0] : transaction.type;
+  const opData = isLegacy ? transaction[1]?.op?.[1] : transaction;
+  const timestamp = isLegacy ? transaction[1]?.timestamp : transaction.timestamp;
+  const trxIndex = isLegacy ? transaction[0] : transaction.num;
+  // Left undefined for a virtual operation, whose trx_id is 40 zeroes because the chain
+  // emitted it rather than anyone broadcasting it.
+  const trxId = resolveTrxId(isLegacy ? transaction[1]?.trx_id : transaction.trx_id);
+
   const result: CoinActivity = {
     iconType: 'MaterialIcons',
-    trxIndex: transaction[0],
+    trxIndex,
+    trxId,
   };
 
-  [result.textKey] = transaction[1].op;
-  const opData = transaction[1].op[1];
-  const { timestamp } = transaction[1];
+  result.textKey = opType;
 
   result.created = timestamp;
   result.icon = 'local-activity';
 
   // Format other wallet related operations
-  result.repeatable = RepeatableTransfers[result.textKey] || false;
+  result.repeatable = RepeatableTransfers[result.textKey ?? ''] || false;
 
   switch (result.textKey) {
     case 'curation_reward':
       const { reward } = opData;
       const { comment_author: commentAuthor, comment_permlink: commentPermlink } = opData;
 
-      result.value = `${vestsToHp(parseToken(reward), hivePerMVests)
+      result.value = `${vestsToHp(parseToken(reward), vestsToHpRate)
         .toFixed(3)
         .replace(',', '.')} HP`;
       result.details = commentAuthor ? `@${commentAuthor}/${commentPermlink}` : null;
@@ -117,7 +95,7 @@ export const groomingTransactionData = (transaction, hivePerMVests): CoinActivit
 
       hbdPayout = parseToken(hbdPayout).toFixed(3).replace(',', '.');
       hivePayout = parseToken(hivePayout).toFixed(3).replace(',', '.');
-      vestingPayout = vestsToHp(parseToken(vestingPayout), hivePerMVests)
+      vestingPayout = vestsToHp(parseToken(vestingPayout), vestsToHpRate)
         .toFixed(3)
         .replace(',', '.');
 
@@ -135,7 +113,7 @@ export const groomingTransactionData = (transaction, hivePerMVests): CoinActivit
 
       rewardHdb = parseToken(rewardHdb).toFixed(3).replace(',', '.');
       rewardHive = parseToken(rewardHive).toFixed(3).replace(',', '.');
-      rewardVests = vestsToHp(parseToken(rewardVests), hivePerMVests).toFixed(3).replace(',', '.');
+      rewardVests = vestsToHp(parseToken(rewardVests), vestsToHpRate).toFixed(3).replace(',', '.');
 
       result.value = `${rewardHdb > 0 ? `${rewardHdb} HBD` : ''} ${
         rewardHive > 0 ? `${rewardHive} HIVE` : ''
@@ -154,6 +132,37 @@ export const groomingTransactionData = (transaction, hivePerMVests): CoinActivit
       result.receiver = to;
       result.memo = memo || null;
       break;
+    case 'recurrent_transfer': {
+      // The on-chain operation that sets up a schedule. `recurrence` is the gap between
+      // executions in hours and `executions` is the total scheduled count; both are
+      // surfaced as the row subtitle by the transaction view.
+      const { amount: rtAmount, memo: rtMemo, from: rtFrom, to: rtTo } = opData;
+      result.value = `${rtAmount}`;
+      result.icon = 'autorenew';
+      result.details = rtFrom && rtTo ? `@${rtFrom} to @${rtTo}` : null;
+      result.sender = rtFrom;
+      result.receiver = rtTo;
+      result.memo = rtMemo || null;
+      result.recurrence = opData.recurrence != null ? `${opData.recurrence}` : '';
+      result.executions = opData.executions != null ? `${opData.executions}` : '';
+      break;
+    }
+    case 'fill_recurrent_transfer': {
+      // Virtual operation emitted on each scheduled execution. It only carries how many
+      // executions remain, which we keep in `executions` for the "Remaining N" subtitle.
+      const { amount: frtAmount, memo: frtMemo, from: frtFrom, to: frtTo } = opData;
+      result.value = `${frtAmount}`;
+      result.icon = 'autorenew';
+      result.details = frtFrom && frtTo ? `@${frtFrom} to @${frtTo}` : null;
+      result.sender = frtFrom;
+      result.receiver = frtTo;
+      result.memo = frtMemo || null;
+      // A fill op carries no cadence; keep the field present so the CoinActivity shape stays consistent.
+      result.recurrence = '';
+      result.executions =
+        opData.remaining_executions != null ? `${opData.remaining_executions}` : '';
+      break;
+    }
     case 'withdraw_vesting':
       const { acc } = opData;
       let { vesting_shares: opVestingShares } = opData;
@@ -230,6 +239,11 @@ export const groomingEngineHistory = (transaction: HistoryItem): CoinActivity | 
   const result: CoinActivity = {
     iconType: 'MaterialIcons',
     trxIndex: blockNumber,
+    engineTrxId: transaction?.id || transaction?._id,
+    // `transactionId` is the Hive transaction the custom_json rode in on, suffixed with
+    // the operation's index. A contract-generated row carries `<block>-<index>` instead,
+    // which resolves to undefined rather than to a link that goes nowhere.
+    trxId: resolveTrxId(transaction?.transactionId),
     textKey: operation,
     created: new Date(timestamp).toISOString(),
     value: `${quantity} ${symbol}`,
@@ -285,6 +299,7 @@ export const groomingEngineHistory = (transaction: HistoryItem): CoinActivity | 
     case EngineOperations.TOKENS_UNDELEGATE_DONE:
     case EngineOperations.TOKENS_UNSTAKE_DONE:
       result.icon = 'hourglass-full';
+      break;
     case EngineOperations.TOKENS_UNDELEGATE_START:
     case EngineOperations.TOKENS_UNSTAKE_START:
       result.icon = 'hourglass-top';
@@ -294,21 +309,64 @@ export const groomingEngineHistory = (transaction: HistoryItem): CoinActivity | 
   return result;
 };
 
+export interface WalletTabData {
+  rewardHiveBalance?: number;
+  rewardHbdBalance?: number;
+  rewardVestingHive?: number;
+  hasUnclaimedRewards?: boolean;
+  balance?: number;
+  vestingShares?: number;
+  vestingSharesDelegated?: number;
+  vestingSharesReceived?: number;
+  vestingSharesTotal?: number;
+  hbdBalance?: number;
+  savingBalance?: number;
+  savingBalanceHbd?: number;
+  hivePerMVests?: number;
+  estimatedValue?: number;
+  estimatedHiveValue?: number;
+  estimatedHbdValue?: number;
+  estimatedHpValue?: number;
+  hasQuotes?: boolean;
+  showPowerDown?: boolean;
+  nextVestingWithdrawal?: number;
+}
+
 export const groomingWalletTabData = async ({
   user,
   globalProps,
   quotes,
-  userCurrency,
+  userCurrency: _userCurrency,
   isRefresh,
+}: {
+  user: any;
+  globalProps: any;
+  quotes: any;
+  userCurrency?: string;
+  isRefresh?: boolean;
 }) => {
-  const walletData = {};
+  const walletData: WalletTabData = {};
 
   if (!user) {
     return walletData;
   }
 
   // TODO: use passed account data if not refreshing
-  const userdata = isRefresh ? await getAccount(get(user, 'name')) : user;
+  const queryClient = getQueryClient();
+  let userdata = user;
+  if (isRefresh) {
+    const accounts = await queryClient.fetchQuery(getAccountsQueryOptions([get(user, 'name')]));
+    if (!accounts || accounts.length === 0) {
+      console.warn(
+        'groomingWalletTabData: fetchQuery returned empty array for user',
+        get(user, 'name'),
+      );
+      // Fall back to passed user data instead of undefined
+      userdata = user;
+    } else {
+      [userdata] = accounts;
+    }
+  }
 
   // const { accounts } = state;
   // if (!accounts) {
@@ -332,17 +390,16 @@ export const groomingWalletTabData = async ({
   walletData.savingBalance = parseToken(userdata.savings_balance);
   walletData.savingBalanceHbd = parseToken(userdata.savings_hbd_balance);
 
+  const shouldFetchFeedHistory = isRefresh || !globalProps?.base || !globalProps?.quote;
   // use base and quote from account.globalProps redux
-  const feedHistory = isRefresh
-    ? await getFeedHistory()
+  const dynamicProps = shouldFetchFeedHistory
+    ? await queryClient.fetchQuery(getDynamicPropsQueryOptions())
     : {
-        current_median_history: {
-          base: globalProps.base,
-          quote: globalProps.quote,
-        },
+        base: globalProps.base,
+        quote: globalProps.quote,
       };
-  const base = parseToken(feedHistory.current_median_history.base);
-  const quote = parseToken(feedHistory.current_median_history.quote);
+  const { base } = dynamicProps;
+  const { quote } = dynamicProps;
 
   walletData.hivePerMVests = globalProps.hivePerMVests;
 
@@ -357,19 +414,21 @@ export const groomingWalletTabData = async ({
 
   walletData.estimatedValue = totalHive * pricePerHive + totalHbd;
 
-  // if refresh not required, use cached quotes
-  const ppHbd = !isRefresh
-    ? quotes.hive_dollar.price
-    : await getCurrencyTokenRate(userCurrency, 'hbd');
-  const ppHive = !isRefresh ? quotes.hive.price : await getCurrencyTokenRate(userCurrency, 'hive');
+  const hbdQuote = quotes?.hive_dollar?.price;
+  const hiveQuote = quotes?.hive?.price;
+  const hasQuotes = hbdQuote != null && hiveQuote != null;
+  // If cached quotes are missing, fall back to on-chain median price (HBD ~ 1, HIVE = pricePerHive).
+  const ppHbd = hbdQuote != null ? hbdQuote : 1;
+  const ppHive = hiveQuote != null ? hiveQuote : pricePerHive;
 
   walletData.estimatedHiveValue = (walletData.balance + walletData.savingBalance) * ppHive;
   walletData.estimatedHbdValue = totalHbd * ppHbd;
   walletData.estimatedHpValue =
     vestsToHp(walletData.vestingShares, walletData.hivePerMVests) * ppHive;
+  walletData.hasQuotes = hasQuotes;
 
   walletData.showPowerDown = userdata.next_vesting_withdrawal !== '1969-12-31T23:59:59';
-  const timeDiff = Math.abs(parseDate(userdata.next_vesting_withdrawal) - new Date());
+  const timeDiff = Math.abs(parseDate(userdata.next_vesting_withdrawal).getTime() - Date.now());
   walletData.nextVestingWithdrawal = Math.round(timeDiff / (1000 * 3600));
 
   return walletData;
@@ -379,9 +438,12 @@ export const fetchPendingRequests = async (
   username: string,
   coinSymbol: string,
 ): Promise<CoinActivity[]> => {
-  const _rawConversions = await getConversionRequests(username);
-  const _rawOpenOrdres = await getOpenOrders(username);
-  const _rawWithdrawRequests = await getSavingsWithdrawFrom(username);
+  const queryClient = getQueryClient();
+  const _rawConversions = await queryClient.fetchQuery(getConversionRequestsQueryOptions(username));
+  const _rawOpenOrdres = await queryClient.fetchQuery(getOpenOrdersQueryOptions(username));
+  const _rawWithdrawRequests = await queryClient.fetchQuery(
+    getSavingsWithdrawFromQueryOptions(username),
+  );
 
   console.log('fetched pending requests', _rawConversions, _rawOpenOrdres, _rawWithdrawRequests);
 
@@ -432,7 +494,8 @@ export const fetchPendingRequests = async (
   const pendingRequests = [...openOrderRequests, ...withdrawRequests, ...conversionRequests];
 
   pendingRequests.sort((a, b) =>
-    new Date(a.expires || a.created).getTime() > new Date(b.expires || b.created).getTime()
+    new Date(a.expires || a.created || 0).getTime() >
+    new Date(b.expires || b.created || 0).getTime()
       ? 1
       : -1,
   );
@@ -443,600 +506,12 @@ export const fetchPendingRequests = async (
 /**
  *
  * @param username
- * @param coinId
  * @param assetSymbol
  * @param globalProps
  * @returns {Promise<CoinActivity[]>}
  */
-export const fetchCoinActivities = async ({
-  username,
-  assetId,
-  assetSymbol,
-  globalProps,
-  startIndex,
-  limit,
-  isEngine,
-}: {
-  username: string;
-  assetId: string;
-  assetSymbol: string;
-  globalProps: GlobalProps;
-  startIndex: number;
-  limit: number;
-  isEngine?: boolean;
-}): Promise<CoinActivity[]> => {
-  const op = operationOrders;
-  let history = [];
 
-  if (!isEngine) {
-    switch (assetId) {
-      case ASSET_IDS.ECENCY: {
-        // TODO: remove condition when we have a way to fetch paginated points data
-        if (startIndex !== -1) {
-          return [];
-        }
-
-        const pointActivities = await getPointsHistory(username);
-        console.log('Points Activities', pointActivities);
-        const completed =
-          pointActivities && pointActivities.length
-            ? pointActivities.map((item) => {
-                const { icon, iconType, textKey } = POINTS[item.type]
-                  ? POINTS[item.type]
-                  : POINTS.default;
-                return groomingPointsTransactionData({
-                  ...item,
-                  icon,
-                  iconType,
-                  textKey,
-                });
-              })
-            : [];
-
-        return completed;
-      }
-      case ASSET_IDS.HIVE:
-        history = await getAccountHistory(
-          username,
-          [
-            op.transfer, // HIVE
-            op.transfer_to_vesting, // HIVE, HP
-            op.withdraw_vesting, // HIVE, HP
-            op.transfer_to_savings, // HIVE, HBD
-            op.transfer_from_savings, // HIVE, HBD
-            op.fill_order, // HIVE, HBD
-          ],
-          startIndex,
-          limit,
-        );
-        break;
-      case ASSET_IDS.HBD:
-        history = await getAccountHistory(
-          username,
-          [
-            op.transfer, // HIVE //HBD
-            op.author_reward, // HBD, HP
-            op.transfer_to_savings, // HIVE, HBD
-            op.transfer_from_savings, // HIVE, HBD
-            op.fill_convert_request, // HBD
-            op.fill_order, // HIVE, HBD
-            op.sps_fund, // HBD
-          ],
-          startIndex,
-          limit,
-        );
-        break;
-      case ASSET_IDS.HP:
-        history = await getAccountHistory(
-          username,
-          [
-            op.author_reward, // HBD, HP
-            op.curation_reward, // HP
-            op.transfer_to_vesting, // HIVE, HP
-            op.withdraw_vesting, // HIVE, HP
-            op.interest, // HP
-            op.claim_reward_balance, // HP
-            op.comment_benefactor_reward, // HP
-            op.return_vesting_delegation, // HP
-          ],
-          startIndex,
-          limit,
-        );
-        break;
-      default:
-        return [];
-    }
-
-    const transfers = history.filter((tx) => transferTypes.includes(get(tx[1], 'op[0]', false)));
-    transfers.sort(compare);
-
-    const activities = transfers.map((item) =>
-      groomingTransactionData(item, globalProps.hivePerMVests),
-    );
-    const filterdActivities: CoinActivity[] = activities
-      ? activities.filter((item) => {
-          return item && item.value && item.value.includes(assetSymbol);
-        })
-      : [];
-
-    console.log('FILTERED comap', activities.length, filterdActivities.length);
-
-    // TODO: process pending requests as separate query //const pendingRequests = await fetchPendingRequests(username, coinSymbol);
-    return filterdActivities;
-  } else {
-    // means asset is engine asset, maps response to
-
-    const engineHistory = await fetchEngineAccountHistory(username, assetSymbol, startIndex, limit);
-    const activities = engineHistory.map(groomingEngineHistory);
-
-    return activities;
-  }
-};
-
-const _processEngineTokens = async (
-  engineData: HiveEngineToken[],
-  hivePrice: number,
-  vsCurrency: string,
-  claimsCache: ClaimsCollection,
-) => {
-  const engineCoinData: { [key: string]: CoinData } = {};
-
-  try {
-    if (engineData) {
-      engineData.forEach((item) => {
-        if (item) {
-          const balance = _processCachedData(
-            item.symbol,
-            item.balance,
-            parseToken(item.unclaimedBalance),
-            claimsCache,
-          );
-          const ppToken = hivePrice * (item.tokenPrice || 1);
-          const volume24h = hivePrice * (item.volume24h || 0);
-
-          const actions = [`${EngineActions.TRANSFER}_engine`];
-
-          if (item.delegationEnabled) {
-            actions.push(`${EngineActions.DELEGATE}_engine`);
-          }
-
-          if (item.delegationEnabled && item.delegationsOut) {
-            actions.push(`${EngineActions.UNDELEGATE}_engine`);
-          }
-
-          if (item.stakingEnabled && item.balance > 0) {
-            actions.push(`${EngineActions.STAKE}_engine`);
-          }
-
-          if (item.stake) {
-            actions.push(`${EngineActions.UNSTAKE}_engine`);
-          }
-
-          engineCoinData[item.symbol] = {
-            name: item.name || '',
-            symbol: item.symbol,
-            iconUrl: item.icon || '',
-            balance,
-            estimateValue: balance * ppToken,
-            vsCurrency,
-            currentPrice: ppToken,
-            unclaimedBalance: item.unclaimedBalance,
-            isEngine: true,
-            percentChange: item.percentChange,
-            precision: item.precision,
-            actions,
-            volume24h,
-            extraDataPairs: [
-              {
-                dataKey: 'staked',
-                value: item.stake !== 0 ? `${item.stake}` : '0.00',
-              },
-              {
-                dataKey: 'delegations_in',
-                value: item.delegationsIn !== 0 ? `${item.delegationsIn}` : '0.00',
-              },
-              {
-                dataKey: 'delegations_out',
-                value: item.delegationsOut !== 0 ? `${item.delegationsOut}` : '0.00',
-              },
-            ],
-          };
-        }
-      });
-    }
-  } catch (err) {
-    console.warn('failed to get engine tokens data', err);
-  }
-
-  return engineCoinData;
-};
-
-const _processSpkData = async (spkWallet: SpkApiWallet, hivePrice: number, vsCurrency: string) => {
-  const spkWalletData: { [key: string]: CoinData } = {};
-
-  try {
-    const _price = parseFloat(spkWallet.tick) * hivePrice;
-
-    if (spkWallet.spk) {
-      const _symbol = ASSET_IDS.SPK;
-      const _spkBalance = spkWallet.spk / 1000;
-
-      spkWalletData[_symbol] = {
-        name: 'SPK Network',
-        symbol: _symbol,
-        balance: _spkBalance,
-        estimateValue: _spkBalance * _price,
-        vsCurrency,
-        currentPrice: _price,
-        isSpk: true,
-        actions: [TransferTypes.TRANSFER_SPK],
-      };
-    }
-
-    const _available = spkWallet.drop?.availible;
-    if (_available) {
-      // compile larynx token
-      const _larBalance = spkWallet.balance / 1000;
-
-      spkWalletData[ASSET_IDS.LARYNX] = {
-        name: `${ASSET_IDS.LARYNX} Token`,
-        symbol: ASSET_IDS.LARYNX,
-        balance: _larBalance,
-        precision: _available.precision,
-        estimateValue: _larBalance * _price,
-        vsCurrency,
-        currentPrice: _price,
-        isSpk: true,
-        actions: [
-          TransferTypes.TRANSFER_LARYNX,
-          TransferTypes.POWER_UP_SPK,
-          // TransferTypes.LOCK_LIQUIDITY
-        ],
-      };
-
-      // compile larynx power
-      const _larPower = spkWallet.poweredUp / 1000;
-      const _grantedPwr = spkWallet.granted?.t ? spkWallet.granted.t / 1000 : 0;
-      const _grantingPwr = spkWallet.granting?.t ? spkWallet.granting.t / 1000 : 0;
-
-      const _totalBalance = _larPower + _grantedPwr + _grantingPwr;
-
-      const _extraDataPairs: DataPair[] = [];
-      if (spkWallet.power_downs) {
-        _extraDataPairs.push({
-          dataKey: 'scheduled_power_downs',
-          value: Object.keys(spkWallet.power_downs).length,
-        });
-      }
-
-      spkWalletData[ASSET_IDS.LARYNX_POWER] = {
-        name: `${ASSET_IDS.LARYNX} Power`,
-        symbol: ASSET_IDS.LARYNX_POWER,
-        balance: _larPower,
-        precision: _available.precision,
-        estimateValue: _larPower * _price,
-        vsCurrency,
-        currentPrice: _price,
-        isSpk: true,
-        extraDataPairs: [
-          ..._extraDataPairs,
-          {
-            dataKey: 'delegated_larynx_power',
-            value: `${_grantedPwr.toFixed(3)} ${ASSET_IDS.LARYNX_POWER}`,
-          },
-          {
-            dataKey: 'delegating_larynx_power',
-            value: `- ${_grantingPwr.toFixed(3)} ${ASSET_IDS.LARYNX_POWER}`,
-          },
-          {
-            dataKey: 'total_larynx_power',
-            value: `${_totalBalance.toFixed(3)} ${ASSET_IDS.LARYNX_POWER}`,
-          },
-        ],
-        actions: [TransferTypes.DELEGATE_SPK, TransferTypes.POWER_DOWN_SPK],
-      };
-    }
-  } catch (err) {
-    console.warn('Failed to get spk data', err);
-  }
-
-  return spkWalletData;
-};
-
-const _processCachedData = (
-  assetId: string,
-  balance = 0,
-  unclaimedBalance: number,
-  claimsCache: ClaimsCollection,
-) => {
-  const rewardHpStrToToken = (rewardStr: string) => {
-    let tokenAmount = 0;
-    rewardStr.split('   ').forEach((str) => {
-      const asset = parseAsset(str);
-      if (asset.symbol === assetId) {
-        tokenAmount = asset.amount;
-      }
-    });
-    return tokenAmount;
-  };
-
-  if (claimsCache) {
-    const _curTime = new Date().getTime();
-
-    let rewardClaimed = 0;
-    let _claim = claimsCache[assetId];
-    switch (assetId) {
-      case ASSET_IDS.HBD:
-      case ASSET_IDS.HIVE:
-      case ASSET_IDS.HP:
-        _claim = claimsCache[ASSET_IDS.HP];
-        if (_claim) {
-          rewardClaimed = rewardHpStrToToken(_claim.rewardValue);
-        }
-        break;
-      default:
-        if (_claim) {
-          rewardClaimed = parseToken(_claim.rewardValue);
-        }
-
-        break;
-    }
-
-    if (_claim && (_claim.expiresAt || 0) > _curTime && rewardClaimed === unclaimedBalance) {
-      balance += rewardClaimed;
-    }
-  }
-
-  return balance;
-};
-
-export const fetchAssetsPortfolio = async ({
-  globalProps,
-  currentAccount,
-  vsCurrency,
-  currencyRate,
-  claimsCache,
-}: {
-  globalProps: GlobalProps;
-  currentAccount: any;
-  vsCurrency: string;
-  currencyRate: number;
-  claimsCache: ClaimsCollection;
-}): Promise<{ [key: string]: CoinData }> => {
-  const { username } = currentAccount;
-  let assetsData = {} as { [key: string]: CoinData };
-
-  if (!username) {
-    return {};
-  }
-
-  const {
-    globalProps: { hivePerMVests },
-    marketData,
-    accountData,
-    pointsData,
-    engineData,
-    spkData,
-  } = await getPortfolio(username);
-
-  const _prices = convertLatestQuotes(marketData, currencyRate);
-
-  DEFAULT_ASSETS.forEach((coinBase) => {
-    switch (coinBase.id) {
-      case ASSET_IDS.ECENCY: {
-        const unclaimedFloat = parseFloat(pointsData.unclaimed_points || '0');
-        let balance = pointsData.points ? parseFloat(pointsData.points) : 0;
-        balance = _processCachedData(coinBase.id, balance, unclaimedFloat, claimsCache);
-
-        const unclaimedBalance = unclaimedFloat ? `${unclaimedFloat} Points` : '';
-        const ppEstm = _prices[coinBase.id].price;
-
-        assetsData[coinBase.id] = {
-          balance: Math.round(balance * 1000) / 1000,
-          estimateValue: balance * ppEstm,
-          vsCurrency,
-          currentPrice: ppEstm,
-          unclaimedBalance,
-          actions: ECENCY_ACTIONS,
-        };
-        break;
-      }
-      case ASSET_IDS.HIVE: {
-        const balance = _processCachedData(
-          coinBase.id,
-          parseToken(accountData.balance),
-          parseToken(accountData.reward_hive_balance),
-          claimsCache,
-        );
-        const savings = parseToken(accountData.savings_balance);
-        const ppHive = _prices[coinBase.id].price;
-
-        assetsData[coinBase.id] = {
-          balance: Math.round(balance * 1000) / 1000,
-          estimateValue: (balance + savings) * ppHive,
-          savings: Math.round(savings * 1000) / 1000,
-          vsCurrency,
-          currentPrice: ppHive,
-          unclaimedBalance: '',
-          actions: HIVE_ACTIONS,
-        };
-        break;
-      }
-
-      case ASSET_IDS.HBD: {
-        const balance = _processCachedData(
-          coinBase.id,
-          parseToken(accountData.hbd_balance),
-          parseToken(accountData.reward_hbd_balance),
-          claimsCache,
-        );
-        const savings = parseToken(accountData.savings_hbd_balance);
-        const ppHbd = _prices[coinBase.id].price;
-
-        assetsData[coinBase.id] = {
-          balance: Math.round(balance * 1000) / 1000,
-          estimateValue: (balance + savings) * ppHbd,
-          savings: Math.round(savings * 1000) / 1000,
-          vsCurrency,
-          currentPrice: ppHbd,
-          unclaimedBalance: '',
-          actions: HBD_ACTIONS,
-        };
-        break;
-      }
-      case ASSET_IDS.HP: {
-        let balance =
-          Math.round(vestsToHp(parseToken(accountData.vesting_shares), hivePerMVests) * 1000) /
-          1000;
-
-        balance = _processCachedData(
-          coinBase.id,
-          balance,
-          parseToken(accountData.vesting_shares),
-          claimsCache,
-        );
-
-        const receivedHP = vestsToHp(
-          parseToken(accountData.received_vesting_shares),
-          hivePerMVests,
-        );
-        const delegatedHP = vestsToHp(
-          parseToken(accountData.delegated_vesting_shares),
-          hivePerMVests,
-        );
-
-        // agggregate claim button text
-        const _getBalanceStr = (val: number, cur: string) =>
-          val ? Math.round(val * 1000) / 1000 + cur : '';
-        const unclaimedBalance = [
-          _getBalanceStr(parseToken(accountData.reward_hive_balance), ' HIVE'),
-          _getBalanceStr(parseToken(accountData.reward_hbd_balance), ' HBD'),
-          _getBalanceStr(parseToken(accountData.vesting_shares), ' HP'),
-        ].reduce(
-          (prevVal, bal) => prevVal + (!bal ? '' : `${prevVal !== '' ? '   ' : ''}${bal}`),
-          '',
-        );
-
-        // calculate power down
-        const pwrDwnHoursLeft = getHoursDifferntial(
-          parseDate(accountData.next_vesting_withdrawal),
-          new Date(),
-        );
-        const isPoweringDown = pwrDwnHoursLeft > 0;
-
-        const nextVestingSharesWithdrawal = isPoweringDown
-          ? Math.min(
-              parseAsset(accountData.vesting_withdraw_rate).amount,
-              (Number(accountData.to_withdraw) - Number(accountData.withdrawn)) / 1e6,
-            )
-          : 0;
-        const nextVestingSharesWithdrawalHive = isPoweringDown
-          ? vestsToHp(nextVestingSharesWithdrawal, hivePerMVests)
-          : 0;
-
-        const estimateVoteValueStr = `$ ${getEstimatedAmount(accountData, globalProps)}`;
-
-        // aaggregate extra data pairs
-        const extraDataPairs: DataPair[] = [];
-
-        if (delegatedHP) {
-          extraDataPairs.push({
-            dataKey: 'delegated_hive_power',
-            value: `- ${delegatedHP.toFixed(3)} HP`,
-            isClickable: true,
-          });
-        }
-
-        if (receivedHP) {
-          extraDataPairs.push({
-            dataKey: 'received_hive_power',
-            value: `+ ${receivedHP.toFixed(3)} HP`,
-            isClickable: true,
-          });
-        }
-
-        if (nextVestingSharesWithdrawalHive) {
-          extraDataPairs.push({
-            dataKey: 'powering_down_hive_power',
-            value: `- ${nextVestingSharesWithdrawalHive.toFixed(3)} HP`,
-            subValue: `${Math.round(pwrDwnHoursLeft)}h`,
-          });
-        }
-
-        extraDataPairs.concat([
-          {
-            dataKey: 'total_hive_power',
-            value: `${(
-              balance -
-              delegatedHP +
-              receivedHP -
-              nextVestingSharesWithdrawalHive
-            ).toFixed(3)} HP`,
-          },
-          {
-            dataKey: 'vote_value',
-            value: estimateVoteValueStr,
-          },
-        ]);
-
-        const ppHive = _prices[ASSET_IDS.HIVE].price;
-        assetsData[coinBase.id] = {
-          balance: Math.round(balance * 1000) / 1000,
-          estimateValue: balance * ppHive,
-          unclaimedBalance,
-          vsCurrency,
-          currentPrice: ppHive,
-          actions: HIVE_POWER_ACTIONS,
-          extraDataPairs: [
-            ...extraDataPairs,
-            {
-              dataKey: 'total_hive_power',
-              value: `${(
-                balance -
-                delegatedHP +
-                receivedHP -
-                nextVestingSharesWithdrawalHive
-              ).toFixed(3)} HP`,
-            },
-            {
-              dataKey: 'vote_value',
-              value: estimateVoteValueStr,
-            },
-          ],
-        };
-        break;
-      }
-
-      default:
-        break;
-    }
-  });
-
-  const engineCoinsData = await _processEngineTokens(
-    engineData,
-    _prices.hive.price,
-    vsCurrency,
-    claimsCache,
-  );
-
-  const spkWalletData = await _processSpkData(spkData, _prices.hive.price, vsCurrency);
-
-  assetsData = { ...assetsData, ...engineCoinsData, ...spkWalletData };
-
-  return assetsData;
-};
-
-function compare(a, b) {
-  if (a[1].block < b[1].block) {
-    return 1;
-  }
-  if (a[1].block > b[1].block) {
-    return -1;
-  }
-  return 0;
-}
-
-export const groomingPointsTransactionData = (transaction) => {
+export const groomingPointsTransactionData = (transaction: any) => {
   if (!transaction) {
     return null;
   }
@@ -1057,7 +532,7 @@ export const groomingPointsTransactionData = (transaction) => {
   return result;
 };
 
-export const getPointsEstimate = async (amount, userCurrency) => {
+export const getPointsEstimate = async (amount: number, userCurrency: string) => {
   if (!amount) {
     return 0;
   }
@@ -1066,7 +541,7 @@ export const getPointsEstimate = async (amount, userCurrency) => {
   return ppEstm * amount;
 };
 
-export const getBtcEstimate = async (amount, userCurrency) => {
+export const getBtcEstimate = async (amount: number, userCurrency: string) => {
   if (!amount) {
     return 0;
   }

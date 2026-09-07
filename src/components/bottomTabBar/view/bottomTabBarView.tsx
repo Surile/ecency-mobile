@@ -1,54 +1,33 @@
 import React, { useEffect } from 'react';
 import { View, TouchableOpacity } from 'react-native';
 
-// Components
-// import TabBar from './tabbar';
-
 // Constants
 import { useDispatch } from 'react-redux';
 import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
-import { useIntl } from 'react-intl';
+
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { isIphoneX } from 'react-native-iphone-x-helper';
+
 import ROUTES from '../../../constants/routeNames';
 
 // Styles
 import styles from './bottomTabBarStyles';
 import Icon, { IconContainer } from '../../icon';
-import { showReplyModal, updateActiveBottomTab } from '../../../redux/actions/uiAction';
-import { useAppSelector } from '../../../hooks';
-import showLoginAlert from '../../../utils/showLoginAlert';
+import WavyDashIcon from '../../../assets/svgs/wavy-dash-icon';
+import { updateActiveBottomTab } from '../../../redux/actions/uiAction';
 
 const BottomTabBarView = ({
   state: { routes, index },
   navigation,
   descriptors,
 }: BottomTabBarProps) => {
-  const intl = useIntl();
   const dispatch = useDispatch();
   const insets = useSafeAreaInsets();
-  const isLoggedIn = useAppSelector((state) => state.application.isLoggedIn);
 
   useEffect(() => {
     dispatch(updateActiveBottomTab(routes[index].name));
   }, [index]);
 
-  const _jumpTo = (route, isFocused) => {
-    if (route.name === ROUTES.TABBAR.POST_BUTTON) {
-      if (!isLoggedIn) {
-        showLoginAlert({ intl });
-        return;
-      }
-
-      if (routes[index].name === ROUTES.TABBAR.WAVES) {
-        dispatch(showReplyModal({ mode: 'wave' }));
-      } else {
-        navigation.navigate(ROUTES.SCREENS.EDITOR, { key: 'editor_post' });
-      }
-
-      return;
-    }
-
+  const _jumpTo = (route: any, isFocused: any) => {
     const event = navigation.emit({
       type: 'tabPress',
       target: route.key,
@@ -67,9 +46,11 @@ const BottomTabBarView = ({
     const iconColor = isFocused ? tabBarActiveTintColor : tabBarInactiveTintColor;
 
     const _iconProps = {
-      iconType: 'MaterialIcons',
+      // MaterialCommunityIcons so every tab can use its outline (non-filled)
+      // glyph; the icon names are the `*-outline` variants set in the navigator.
+      iconType: 'MaterialCommunityIcons',
       style: { paddingTop: 15 },
-      name: route.params.iconName,
+      name: (route.params as any).iconName,
       color: iconColor,
       size: 26,
     };
@@ -79,10 +60,13 @@ const BottomTabBarView = ({
       case ROUTES.TABBAR.NOTIFICATION:
         _tabBarIcon = <IconContainer isBadge badgeType="notification" {..._iconProps} />;
         break;
-      case ROUTES.TABBAR.POST_BUTTON:
+      case ROUTES.TABBAR.CHATS:
+        _tabBarIcon = <IconContainer isBadge badgeType="chat" {..._iconProps} />;
+        break;
       case ROUTES.TABBAR.WAVES:
-        _iconProps.iconType = 'MaterialCommunityIcons';
-        _tabBarIcon = <Icon {..._iconProps} />;
+        // Custom wavy-dash (〰️) SVG; tinted to match the active/inactive tint
+        // and aligned with the other icons via the shared paddingTop style.
+        _tabBarIcon = <WavyDashIcon color={iconColor} size={26} style={_iconProps.style} />;
         break;
     }
 
@@ -93,9 +77,9 @@ const BottomTabBarView = ({
     );
   });
 
-  const _bottomPadding = insets.bottom + (isIphoneX() ? 0 : 12);
+  const _bottomPadding = insets.bottom || 16;
 
-  return <View style={{ ...styles.wrapper, paddingBottom: _bottomPadding }}>{_tabButtons}</View>;
+  return <View style={[styles.wrapper, { paddingBottom: _bottomPadding }]}>{_tabButtons}</View>;
 };
 
 export default BottomTabBarView;

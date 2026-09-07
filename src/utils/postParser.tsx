@@ -1,33 +1,22 @@
-import { get, isArray } from 'lodash';
-import { Platform } from 'react-native';
-import { postBodySummary, renderPostBody, catchPostImage } from '@ecency/render-helper';
+import { get } from 'lodash';
+import { renderPostBody, catchPostImage } from '@ecency/render-helper';
+import { getContentModerationReason } from '@ecency/sdk';
 import { Image as ExpoImage } from 'expo-image';
 
 // Utils
 import parseAsset from './parseAsset';
-import { getResizedAvatar } from './image';
+import { getResizedAvatar, shouldPrefetchImages } from './image';
 import { parseReputation } from './user';
-import { CacheStatus } from '../redux/reducers/cacheReducer';
 import { calculateVoteReward } from './vote';
-
-const webp = Platform.OS !== 'ios';
-
-export const parsePosts = (posts, currentUserName, discardBody = false) => {
-  if (posts) {
-    const formattedPosts = posts.map((post) =>
-      parsePost(post, currentUserName, false, true, discardBody),
-    );
-    return formattedPosts;
-  }
-  return null;
-};
+import { parseSummary } from './postSummary';
 
 export const parsePost = (
-  post,
-  currentUserName,
-  isPromoted,
+  post: any,
+  currentUserName: string | null | undefined,
+  isPromoted: boolean,
   isList = false,
   discardBody = false,
+  currentTime?: number, // Optional timestamp to avoid creating new Date for each post
 ) => {
   if (!post) {
     return null;
@@ -48,42 +37,114 @@ export const parsePost = (
   // adjust tags type as it can be string sometimes;
   post = parseTags(post);
 
+  // detect cross-post and swap display data with original entry
+  // mirrors website behavior: show original post content with cross-post indicator
+  if (post.original_entry) {
+    const orig = post.original_entry;
+
+    // parse original entry's json_metadata if needed
+    if (typeof orig.json_metadata === 'string' || orig.json_metadata instanceof String) {
+      try {
+        orig.json_metadata = JSON.parse(orig.json_metadata as string);
+      } catch (_e) {
+        orig.json_metadata = {};
+      }
+    }
+
+    post.crosspostMeta = {
+      author: post.author,
+      community: post.community || '',
+    };
+
+    // swap display fields to original post content, matching website behavior
+    post.author = orig.author;
+    post.author_reputation = orig.author_reputation;
+    post.permlink = orig.permlink;
+    post.category = orig.category;
+    post.url = orig.url;
+    post.body = orig.body;
+    post.title = orig.title;
+    post.json_metadata = orig.json_metadata || post.json_metadata;
+    post.pending_payout_value = orig.pending_payout_value;
+    post.author_payout_value = orig.author_payout_value;
+    post.curator_payout_value = orig.curator_payout_value;
+    post.max_accepted_payout = orig.max_accepted_payout;
+    // also carry the numeric payout fields so the numeric-payout fallback below uses
+    // the original entry's value when it lacks the asset-string fields
+    post.payout = orig.payout;
+    post.total_payout = orig.total_payout;
+    post.active_votes = orig.active_votes;
+    post.children = orig.children;
+    post.stats = orig.stats;
+    // net_rshares belongs with active_votes: leaving the wrapper's value here produced a
+    // hybrid where a downvoted wrapper plus the original's healthy votes satisfied the
+    // downvote check, and a downvoted original went unflagged behind a healthy wrapper.
+    post.net_rshares = orig.net_rshares;
+  }
+
   // extract cover image and thumbnail from post body
-  post.image = catchPostImage(post, 600, 500, webp ? 'webp' : 'match');
-  post.thumbnail = catchPostImage(post, 10, 7, webp ? 'webp' : 'match');
+  post.image = catchPostImage(post, 600, 500, 'match');
+  post.thumbnail = catchPostImage(post, 10, 7, 'match');
 
   // find and inject thumbnail ratio
-  if (post.json_metadata.image_ratios) {
+  if (post.json_metadata?.image_ratios) {
     const imgRatios = post.json_metadata.image_ratios;
     if (typeof imgRatios[0] === 'number' && !Number.isNaN(imgRatios[0])) {
       [post.thumbRatio] = post.json_metadata.image_ratios;
     } else if (imgRatios.length && imgRatios[0]?.height && imgRatios[0]?.width) {
       // convert to image ratio if old meta data found
-      post.json_metadata.image_ratios = imgRatios.map((item) => {
+      post.json_metadata.image_ratios = imgRatios.map((item: any) => {
         const ratio = item.width / item.height;
         return item.width && item.height ? parseFloat(ratio.toFixed(4)) : item;
       });
     }
   }
 
+  post.json_metadata = parseLinksMeta(post.json_metadata);
+
   post.author_reputation = parseReputation(post.author_reputation);
   post.avatar = getResizedAvatar(get(post, 'author'));
   if (!isList) {
-    post.body = renderPostBody({ ...post, last_update: post.updated }, true, webp);
+    post.body = renderPostBody({ ...post, last_update: post.updated }, true, false);
   }
-  post.summary = postBodySummary(post, 150, Platform.OS);
+  post.summary = parseSummary(post);
   post.max_payout = parseAsset(post.max_accepted_payout).amount || 0;
-  post.is_declined_payout = post.max_payout === 0;
+  post.is_declined_payout = !!post.max_accepted_payout && post.max_payout === 0;
 
-  const totalPayout =
-    parseAsset(post.pending_payout_value).amount +
-    parseAsset(post.author_payout_value).amount +
-    parseAsset(post.curator_payout_value).amount;
+  // Some entries expose the payout as a single numeric field and omit the asset-string
+  // fields, so the parseAsset sum would yield 0 and hide a real payout: search-API
+  // results carry `total_payout`, other RPC shapes carry `payout`. Mirror the web
+  // client's entry-payout and fall back to that numeric value when the asset-string
+  // fields are absent (Hive always sends max_accepted_payout for normal posts, so this
+  // only triggers for the numeric-only shapes).
+  const _numericPayout =
+    typeof post.payout === 'number'
+      ? post.payout
+      : typeof post.total_payout === 'number'
+      ? post.total_payout
+      : undefined;
+  const _isNumericPayoutOnly = _numericPayout !== undefined && !post.max_accepted_payout;
+
+  const totalPayout = _isNumericPayoutOnly
+    ? _numericPayout
+    : parseAsset(post.pending_payout_value).amount +
+      parseAsset(post.author_payout_value).amount +
+      parseAsset(post.curator_payout_value).amount;
 
   post.total_payout = totalPayout;
 
-  // stamp posts with fetched time;
-  post.post_fetched_at = new Date().getTime();
+  // set mute status. The rules live in the SDK so this app and the website flag
+  // the same content for the same reason.
+  post.mutedReason = getContentModerationReason(post);
+  post.isMuted = !!post.mutedReason;
+
+  // determine vote status
+  const vote = (post.active_votes || []).find((element: any) => element.voter === currentUserName);
+  post.isUpVoted = !!vote && vote.rshares > 0;
+  post.isDownVoted = !!vote && vote.rshares < 0;
+
+  // stamp posts with fetched time (use provided timestamp or create new one)
+  post.post_fetched_at = currentTime || new Date().getTime();
 
   // discard post body if list
   if (discardBody) {
@@ -91,20 +152,26 @@ export const parsePost = (
   }
 
   // cache image
-  if (post.image) {
+  // Prefetching pulls the full-size cover of every post in the feed, which is
+  // exactly the traffic "Show Images" is meant to avoid. A revealed image still
+  // loads on demand when the user taps its placeholder.
+  if (post.image && shouldPrefetchImages()) {
     ExpoImage.prefetch([post.image]);
   }
 
   return post;
 };
 
-export const parseDiscussionCollection = async (commentsMap: { [key: string]: any }) => {
+export const parseDiscussionCollection = async (
+  commentsMap: { [key: string]: any },
+  currentUsername?: string,
+) => {
   Object.keys(commentsMap).forEach((key) => {
     const comment = commentsMap[key];
 
     // prcoess first level comment
     if (comment) {
-      commentsMap[key] = parseComment(comment);
+      commentsMap[key] = parseComment(comment, currentUsername);
     } else {
       delete commentsMap[key];
     }
@@ -115,9 +182,14 @@ export const parseDiscussionCollection = async (commentsMap: { [key: string]: an
 };
 
 // TODO: discard/deprecate method after porting getComments in commentsContainer to getDiscussionCollection
-export const parseCommentThreads = async (commentsMap: any, author: string, permlink: string) => {
+export const parseCommentThreads = async (
+  commentsMap: any,
+  author: string,
+  permlink: string,
+  currentUsername?: string,
+) => {
   const MAX_THREAD_LEVEL = 3;
-  const comments = [];
+  const comments: any[] = [];
 
   if (!commentsMap) {
     return null;
@@ -129,7 +201,7 @@ export const parseCommentThreads = async (commentsMap: any, author: string, perm
       return replies.map((pathKey) => {
         const comment = commentsMap[pathKey];
         if (comment) {
-          const parsedComment = parseComment(comment);
+          const parsedComment = parseComment(comment, currentUsername);
           parsedComment.replies = parseReplies(commentsMap, parsedComment.replies, level + 1);
           return parsedComment;
         } else {
@@ -145,7 +217,7 @@ export const parseCommentThreads = async (commentsMap: any, author: string, perm
 
     // prcoess first level comment
     if (comment && comment.parent_author === author && comment.parent_permlink === permlink) {
-      const _parsedComment = parseComment(comment);
+      const _parsedComment = parseComment(comment, currentUsername);
       _parsedComment.replies = parseReplies(commentsMap, _parsedComment.replies, 1);
       comments.push(_parsedComment);
     }
@@ -160,7 +232,7 @@ export const mapDiscussionToThreads = async (
   permlink: string,
   maxLevel = 3,
 ) => {
-  const comments = [];
+  const comments: any[] = [];
 
   if (!commentsMap) {
     return null;
@@ -195,20 +267,20 @@ export const mapDiscussionToThreads = async (
   return comments;
 };
 
-export const parseComments = (comments: any[]) => {
+export const parseComments = (comments: any[], currentUsername?: string) => {
   if (!comments) {
     return null;
   }
 
-  return comments.map((comment) => parseComment(comment));
+  return comments.map((comment) => parseComment(comment, currentUsername));
 };
 
-export const parseComment = (comment: any) => {
+export const parseComment = (comment: any, currentUsername?: string, currentTime?: number) => {
   comment.pending_payout_value = parseFloat(get(comment, 'pending_payout_value', 0)).toFixed(3);
   comment.author_reputation = parseReputation(get(comment, 'author_reputation'));
   comment.avatar = getResizedAvatar(get(comment, 'author'));
   comment.markdownBody = get(comment, 'body');
-  comment.body = renderPostBody({ ...comment, last_update: comment.updated }, true, webp);
+  comment.body = renderPostBody({ ...comment, last_update: comment.updated }, true, false);
 
   // parse json meta;
   if (typeof comment.json_metadata === 'string' || comment.json_metadata instanceof String) {
@@ -223,138 +295,54 @@ export const parseComment = (comment: any) => {
   comment = parseTags(comment);
 
   comment.max_payout = parseAsset(comment.max_accepted_payout).amount || 0;
-  comment.is_declined_payout = comment.max_payout === 0;
+  comment.is_declined_payout = !!comment.max_accepted_payout && comment.max_payout === 0;
 
   // calculate and set total_payout to show to user.
-  const totalPayout =
-    parseAsset(comment.pending_payout_value).amount +
-    parseAsset(comment.author_payout_value).amount +
-    parseAsset(comment.curator_payout_value).amount;
+  // Same numeric-payout fallback as parsePost: search-API / RPC-shaped entries expose a
+  // single numeric field (`total_payout` or `payout`) without the asset-string fields,
+  // so use it when those are absent.
+  const _numericPayout =
+    typeof comment.payout === 'number'
+      ? comment.payout
+      : typeof comment.total_payout === 'number'
+      ? comment.total_payout
+      : undefined;
+  const _isNumericPayoutOnly = _numericPayout !== undefined && !comment.max_accepted_payout;
+
+  const totalPayout = _isNumericPayoutOnly
+    ? _numericPayout
+    : parseAsset(comment.pending_payout_value).amount +
+      parseAsset(comment.author_payout_value).amount +
+      parseAsset(comment.curator_payout_value).amount;
 
   comment.total_payout = totalPayout;
 
   comment.isDeletable = !(
     comment.active_votes?.length > 0 ||
     comment.children > 0 ||
-    comment.net_rshares > 0 ||
-    comment.is_paidout
+    comment.net_rshares > 0
   );
 
-  // stamp comments with fetched time;
-  comment.post_fetched_at = new Date().getTime();
+  // set mute status
+  comment.mutedReason = getContentModerationReason(comment);
+  comment.isMuted = !!comment.mutedReason;
+
+  // set user vote status on comment
+  const vote = (comment.active_votes || []).find(
+    (element: any) => element.voter === currentUsername,
+  );
+  comment.isUpVoted = !!vote && vote.rshares > 0;
+  comment.isDownVoted = !!vote && vote.rshares < 0;
+
+  // stamp comments with fetched time (use provided timestamp or create new one)
+  comment.post_fetched_at = currentTime || new Date().getTime();
+
+  comment.json_metadata = parseLinksMeta(comment.json_metadata);
 
   return comment;
 };
 
-export const injectPostCache = (commentsMap, cachedComments, cachedVotes, lastCacheUpdate) => {
-  let shouldClone = false;
-  const _comments = commentsMap || {};
-  console.log('updating with cache', _comments, cachedComments);
-  if (!cachedComments || !_comments) {
-    console.log('Skipping cache injection');
-    return _comments;
-  }
-
-  // process votes cache
-  Object.keys(cachedVotes).forEach((path) => {
-    const cachedVote = cachedVotes[path];
-    if (_comments[path]) {
-      console.log('injection vote cache');
-      _comments[path] = injectVoteCache(_comments[path], cachedVote);
-    }
-  });
-
-  // process comments cache
-
-  Object.keys(cachedComments).forEach((path) => {
-    const currentTime = new Date().getTime();
-    const cachedComment = cachedComments[path];
-    const _parentPath = `${cachedComment.parent_author}/${cachedComment.parent_permlink}`;
-    const cacheUpdateTimestamp = new Date(cachedComment.updated || 0).getTime();
-
-    switch (cachedComment.status) {
-      case CacheStatus.DELETED:
-        if (_comments && _comments[path]) {
-          delete _comments[path];
-          shouldClone = true;
-        }
-        break;
-      case CacheStatus.UPDATED:
-      case CacheStatus.PENDING:
-        // check if commentKey already exist in comments map,
-        if (_comments[path]) {
-          shouldClone = true;
-          // check if we should update comments map with cached map based on updat timestamp
-          const remoteUpdateTimestamp = new Date(_comments[path].updated).getTime();
-
-          if (cacheUpdateTimestamp > remoteUpdateTimestamp) {
-            _comments[path].body = cachedComment.body;
-          }
-        }
-
-        // if comment key do not exist, possiblky comment is a new comment, in this case, check if parent of comment exist in map
-        else if (_comments[_parentPath]) {
-          shouldClone = true;
-          // in this case add comment key in childern and inject cachedComment in commentsMap
-          _comments[path] = cachedComment;
-          _comments[_parentPath].replies.push(path);
-          _comments[_parentPath].children += 1;
-
-          // if comment was created very recently enable auto reveal
-          if (lastCacheUpdate.postPath === path && currentTime - lastCacheUpdate.updatedAt < 5000) {
-            console.log('setting show replies flag');
-            _comments[_parentPath].expandedReplies = true;
-            _comments[path].renderOnTop = true;
-          }
-        }
-        break;
-    }
-  });
-
-  return shouldClone ? { ..._comments } : _comments;
-};
-
-export const injectVoteCache = (post, voteCache) => {
-  if (voteCache && voteCache.status !== CacheStatus.FAILED) {
-    const _voteIndex = post.active_votes.findIndex((i) => i.voter === voteCache.voter);
-
-    // if vote do not already exist
-    if (_voteIndex < 0 && voteCache.status !== CacheStatus.DELETED) {
-      post.total_payout += voteCache.amount * (voteCache.isDownvote ? -1 : 1);
-
-      // calculate updated totalRShares and send to post
-      const _totalRShares = post.active_votes.reduce(
-        (accumulator: number, item: any) => accumulator + parseFloat(item.rshares),
-        voteCache.rshares,
-      );
-      const _newVote = parseVote(voteCache, post, _totalRShares);
-      post.active_votes = [...post.active_votes, _newVote];
-    }
-
-    // if vote already exist
-    else {
-      const _vote = post.active_votes[_voteIndex];
-
-      // get older and new reward for the vote
-      const _oldReward = calculateVoteReward(_vote.rshares, post);
-
-      // update total payout
-      const _voteAmount = voteCache.amount * (voteCache.isDownvote ? -1 : 1);
-      post.total_payout += _voteAmount - _oldReward;
-
-      // update vote entry
-      _vote.rshares = voteCache.rshares;
-      _vote.percent100 = _vote.percent && voteCache.percent / 100;
-
-      post.active_votes[_voteIndex] = _vote;
-      post.active_votes = [...post.active_votes];
-    }
-  }
-
-  return post;
-};
-
-export const isVoted = async (activeVotes, currentUserName) => {
+export const isVoted = (activeVotes: any[], currentUserName: string | null | undefined) => {
   if (!currentUserName) {
     return false;
   }
@@ -367,7 +355,7 @@ export const isVoted = async (activeVotes, currentUserName) => {
   return false;
 };
 
-export const isDownVoted = async (activeVotes, currentUserName) => {
+export const isDownVoted = (activeVotes: any[], currentUserName: string | null | undefined) => {
   if (!currentUserName) {
     return false;
   }
@@ -380,11 +368,17 @@ export const isDownVoted = async (activeVotes, currentUserName) => {
   return false;
 };
 
-export const parseActiveVotes = (post) => {
-  const _totalRShares = post.active_votes.reduce((a, b) => a + parseFloat(b.rshares), 0);
+export const parseActiveVotes = (post: any) => {
+  const votes = Array.isArray(post.active_votes) ? post.active_votes : [];
+  const _totalRShares = votes.reduce(
+    (accumulator: number, item: any) => accumulator + parseFloat(item.rshares),
+    0,
+  );
 
-  if (isArray(post.active_votes)) {
-    post.active_votes = post.active_votes.map((vote) => parseVote(vote, post, _totalRShares));
+  if (votes.length) {
+    post.active_votes = votes.map((vote: any) => parseVote(vote, post, _totalRShares));
+  } else {
+    post.active_votes = votes;
   }
 
   return post.active_votes;
@@ -413,4 +407,43 @@ const parseTags = (post: any) => {
     }
   }
   return post;
+};
+
+const parseLinksMeta = (jsonMeta: any) => {
+  // If jsonMeta is null, undefined, or doesn't have links_meta, return the original object
+  if (!jsonMeta || !jsonMeta.links_meta) {
+    return jsonMeta;
+  }
+
+  const validatedLinksMeta: Record<string, any> = {};
+  let hasValidLinks = false;
+
+  // Iterate through each key in links_meta
+  Object.entries(jsonMeta.links_meta).forEach(([key, linkData]) => {
+    // Check if linkData is an object and has the required title and summary properties
+    if (
+      linkData &&
+      typeof linkData === 'object' &&
+      typeof (linkData as any).title === 'string' &&
+      typeof (linkData as any).summary === 'string' &&
+      typeof (linkData as any).image === 'string'
+    ) {
+      // This link is well-formed, add it to validated links
+      validatedLinksMeta[key] = linkData;
+      hasValidLinks = true;
+    }
+    // If not well-formed, don't include this link
+  });
+
+  // Create a new object with the validated links_meta
+  const result = { ...jsonMeta };
+
+  // Only set links_meta if we have valid links, otherwise remove it
+  if (hasValidLinks) {
+    result.links_meta = validatedLinksMeta;
+  } else {
+    delete result.links_meta;
+  }
+
+  return result;
 };

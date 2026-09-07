@@ -7,6 +7,7 @@ import parseAsset from '../../../utils/parseAsset';
 import { getTimeFromNow } from '../../../utils/time';
 
 import { FormattedCurrency } from '../../formatedElements';
+import { selectGlobalProps } from '../../../redux/selectors';
 // Styles
 import styles from './upvoteStyles';
 
@@ -17,7 +18,7 @@ interface Props {
 export const PayoutDetailsContent = ({ content }: Props) => {
   const intl = useIntl();
 
-  const globalProps = useAppSelector((state) => state.account.globalProps);
+  const globalProps = useAppSelector(selectGlobalProps);
 
   const authorPayout = parseAsset(content.author_payout_value).amount;
   const curationPayout = parseAsset(content.curator_payout_value).amount;
@@ -53,10 +54,10 @@ export const PayoutDetailsContent = ({ content }: Props) => {
     (pending_payout_printed_hive > 0 ? `${pending_payout_printed_hive.toFixed(3)} HIVE\n` : '') +
     (pending_payout_hp > 0 ? `${pending_payout_hp.toFixed(3)} HP` : '');
 
-  const beneficiaries = [];
+  const beneficiaries: any[] = [];
   const beneficiary = content?.beneficiaries;
   if (beneficiary) {
-    beneficiary.forEach((key, index) => {
+    beneficiary.forEach((key: any, index: any) => {
       beneficiaries.push(
         `${index !== 0 ? '\n' : ''}${key?.account}: ${(parseFloat(key?.weight) / 100).toFixed(2)}%`,
       );
@@ -69,7 +70,7 @@ export const PayoutDetailsContent = ({ content }: Props) => {
     warnZeroPayout = true;
   }
 
-  const _payoutPopupItem = (label, value) => {
+  const _payoutPopupItem = (label: any, value: any) => {
     return (
       <View style={styles.popoverItemContent}>
         <Text style={styles.detailsLabel}>{label}</Text>

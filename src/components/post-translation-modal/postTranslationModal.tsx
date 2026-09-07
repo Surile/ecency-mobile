@@ -1,60 +1,77 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { ActivityIndicator, Alert, FlatList, Platform, Text, View } from 'react-native';
+import React, { useEffect, useState, useMemo } from 'react';
+import { ActivityIndicator, Platform, Text, View } from 'react-native';
 import { useIntl } from 'react-intl';
 import EStyleSheet from 'react-native-extended-stylesheet';
-import ActionSheet, { useScrollHandlers } from 'react-native-actions-sheet';
+import ActionSheet, { SheetProps } from 'react-native-actions-sheet';
 import { postBodySummary } from '@ecency/render-helper';
-import SelectDropdown from 'react-native-select-dropdown';
-import { useDispatch } from 'react-redux';
+import Placeholder from 'rn-placeholder';
+import Animated, { LinearTransition, Easing } from 'react-native-reanimated';
 import { getTranslation, fetchSupportedLangs } from '../../providers/translation/translation';
 import styles from './postTranslationModalStyle';
 import { useAppSelector } from '../../hooks';
-import { hideTranslationModal } from '../../redux/actions/uiAction';
+import { DropdownButton, Icon, ModalHeader } from '..';
+import { selectLanguage } from '../../redux/selectors';
+
+interface Language {
+  name: string;
+  code: string;
+}
 
 const srcLang = { name: 'Auto', code: 'auto' };
 const targetLang = { name: 'English', code: 'en' };
 
-const PostTranslationModal = () => {
+const PostTranslationModal = ({ payload }: SheetProps<'post_translation'>) => {
   const intl = useIntl();
-  const dispatch = useDispatch();
-  const bottomSheetModalRef = useRef<ActionSheet | null>(null);
-  const scrollHandlers = useScrollHandlers<FlatList>('scrollview-1', bottomSheetModalRef);
-  const appLang = useAppSelector((state) => state.application.language);
-  const translationModalVisible = useAppSelector((state) => state.ui.translationModalVisible);
-  const translationModalData = useAppSelector((state) => state.ui.translationModalData);
+  const content = payload?.content;
+  const initialTargetCode = payload?.initialTargetCode;
+  const initialSource = payload?.initialSource;
 
-  const [content, setContent] = useState<any>(null);
+  const appLang = useAppSelector(selectLanguage);
+
   const [translatedPost, setTranslatedPost] = useState('');
-  // const [supportedLangs, setSupportedLangs] = useState([]);
-  const [supportedLangsList, setSupportedLangsList] = useState([]);
-  const [selectedSourceLang, setSelectedSourceLang] = useState(srcLang);
-  const [selectedTargetLang, setSelectedTargetLang] = useState(null);
+  const [originalText, setOriginalText] = useState('');
+  const [supportedLangsList, setSupportedLangsList] = useState<Language[]>([]);
+  const [selectedSourceLang, setSelectedSourceLang] = useState<Language>(srcLang);
+  const [selectedTargetLang, setSelectedTargetLang] = useState<Language | null>(null);
+
   const [isLoadingTranslation, setIsLoadingTranslation] = useState(false);
   const [isLoadingLangsList, setisLoadingLangsList] = useState(false);
   const [translationError, setTranslationError] = useState('');
 
+  const _dropdownOptions = useMemo(
+    () => supportedLangsList.map((lang) => lang.name),
+    [supportedLangsList],
+  );
+
   useEffect(() => {
-    if (translationModalVisible) {
-      if (bottomSheetModalRef?.current) {
-        if (!translationModalData) {
-          Alert.alert(
-            intl.formatMessage({ id: 'alert.something_wrong' }),
-            'Post content not passed for viewing post options',
-          );
-          return;
-        }
-        setContent(translationModalData);
-        bottomSheetModalRef?.current?.show();
-        getSupportedLanguages();
-      }
-    } else {
-      _handleOnSheetClose();
+    getSupportedLanguages();
+  }, []);
+
+  // Sheets mount on show, so this applies the pre-selected target/source on every open. It has
+  // to run again once the language list resolves, which is why the list is a dependency: on the
+  // first open the codes arrive before the list and there is nothing to match them against yet.
+  useEffect(() => {
+    if (!supportedLangsList.length) {
+      return;
     }
-  }, [translationModalVisible]);
+    if (initialTargetCode) {
+      const match = supportedLangsList.find((l) => l?.code === initialTargetCode);
+      if (match) {
+        setSelectedTargetLang(match);
+      }
+    }
+    if (initialSource) {
+      const match = supportedLangsList.find((l) => l?.code === initialSource);
+      if (match) {
+        setSelectedSourceLang(match);
+      }
+    }
+  }, [payload, initialTargetCode, initialSource, supportedLangsList]);
 
   useEffect(() => {
     if (content && content.body) {
-      const body = postBodySummary(content.body, null, Platform.OS);
+      const body = postBodySummary(content.body, null as any, Platform.OS as any);
+      setOriginalText(body);
       translateText(body);
     }
   }, [content, selectedSourceLang, selectedTargetLang]);
@@ -78,7 +95,7 @@ const PostTranslationModal = () => {
     } catch (error) {
       setIsLoadingTranslation(false);
       setTranslationError(
-        error?.message ||
+        (error as any)?.message ||
           intl.formatMessage({
             id: 'alert.error',
           }),
@@ -93,7 +110,7 @@ const PostTranslationModal = () => {
       const res = await fetchSupportedLangs();
       if (res && res.length) {
         // setSupportedLangs(res);
-        const langs = res.map((item) => {
+        const langs = res.map((item: any) => {
           return {
             code: item.code,
             name: item.name,
@@ -110,15 +127,10 @@ const PostTranslationModal = () => {
   };
 
   const _handleOnSheetClose = () => {
-    setContent('');
     setTranslatedPost('');
     setTranslationError('');
     setSelectedSourceLang(srcLang);
     setSelectedTargetLang(targetLang);
-    dispatch(hideTranslationModal());
-    if (bottomSheetModalRef?.current) {
-      bottomSheetModalRef?.current?.hide();
-    }
   };
 
   const _checkApplang = (langsList: any[]) => {
@@ -134,85 +146,97 @@ const PostTranslationModal = () => {
   };
 
   const _renderLanguageSelector = () => (
-    <>
+    <View style={styles.languageSelectorRow}>
       <View style={styles.row}>
-        <Text style={styles.labelText}>{intl.formatMessage({ id: 'wallet.from' })}</Text>
-        <SelectDropdown
-          data={supportedLangsList}
-          onSelect={(selectedItem) => {
-            setSelectedSourceLang(selectedItem);
-          }}
-          buttonTextAfterSelection={(selectedItem) => {
-            return selectedItem?.name || '';
-          }}
-          rowTextForSelection={(item) => {
-            return item.name || '';
-          }}
-          dropdownStyle={styles.languageDropdownStyle}
-          defaultValue={srcLang}
-          buttonStyle={styles.dropdownBtnStyle}
-          buttonTextStyle={styles.dropdownBtnTextStyle}
-          rowTextStyle={styles.dropdownRowTextStyle}
-          selectedRowStyle={styles.dropdownSelectedRowStyle}
-          selectedRowTextStyle={styles.dropdownSelectedRowTextStyle}
-          dropdownFlatlistProps={scrollHandlers}
+        <DropdownButton
+          style={styles.dropdownStyle}
+          defaultText={selectedSourceLang.name}
+          iconStyle={styles.dropdownIconStyle}
+          isHasChildIcon
+          noHighlight
+          onSelect={(index: any) => setSelectedSourceLang(supportedLangsList[index])}
+          options={_dropdownOptions}
+          textStyle={styles.dropdownRowTextStyle}
+          disableFrameAdjustment={true}
         />
       </View>
+
+      <Icon iconType="MaterialIcons" name="translate" style={styles.convertIcon} size={24} />
+      <Icon iconType="MaterialIcons" name="arrow-forward" style={styles.convertIcon} size={16} />
+
       <View style={styles.row}>
-        <Text style={[styles.labelText, styles.toText]}>
-          {intl.formatMessage({ id: 'wallet.to' })}
-        </Text>
-        <SelectDropdown
-          data={supportedLangsList.filter(
-            (item) => item.code !== srcLang.code || item.code !== selectedSourceLang.code,
-          )}
-          onSelect={(selectedItem) => {
-            setSelectedTargetLang(selectedItem);
-          }}
-          buttonTextAfterSelection={(selectedItem) => {
-            return selectedItem?.name || '';
-          }}
-          rowTextForSelection={(item) => {
-            return item.name || '';
-          }}
-          dropdownStyle={styles.languageDropdownStyle}
-          defaultValue={selectedTargetLang}
-          buttonStyle={styles.dropdownBtnStyle}
-          buttonTextStyle={styles.dropdownBtnTextStyle}
-          rowTextStyle={styles.dropdownRowTextStyle}
-          selectedRowStyle={styles.dropdownSelectedRowStyle}
-          selectedRowTextStyle={styles.dropdownSelectedRowTextStyle}
-          dropdownFlatlistProps={scrollHandlers}
-        />
+        {isLoadingLangsList ? (
+          <ActivityIndicator />
+        ) : (
+          <DropdownButton
+            style={styles.dropdownStyle}
+            defaultText={selectedTargetLang?.name}
+            iconStyle={styles.dropdownIconStyle}
+            isHasChildIcon
+            noHighlight
+            onSelect={(index: any) => setSelectedTargetLang(supportedLangsList[index])}
+            options={_dropdownOptions}
+            textStyle={styles.dropdownRowTextStyle}
+            disableFrameAdjustment={true}
+          />
+        )}
       </View>
-    </>
+    </View>
   );
+
+  const _renderTranslation = () => {
+    return (
+      <>
+        <Animated.View
+          style={{ overflow: 'hidden' }}
+          layout={
+            Platform.OS === 'ios' ? LinearTransition.easing(Easing.ease).duration(300) : undefined
+          }
+        >
+          {!isLoadingTranslation && (
+            <Text style={styles.translatedText}>
+              {isLoadingTranslation ? '' : translationError || translatedPost}
+            </Text>
+          )}
+        </Animated.View>
+        {isLoadingTranslation && (
+          <Placeholder.Paragraph
+            style={{ marginTop: 24, marginHorizontal: 16 }}
+            color={EStyleSheet.value('$primaryLightBackground')}
+            lineNumber={4}
+            textSize={16}
+            lineSpacing={5}
+            width="100%"
+            lastLineWidth="70%"
+            firstLineWidth="50%"
+            animate="fade"
+          />
+        )}
+      </>
+    );
+
+    // return <Text style={styles.translatedText}>{translationError || translatedPost}</Text>;
+  };
 
   return (
     <ActionSheet
-      ref={bottomSheetModalRef}
       gestureEnabled={true}
       containerStyle={styles.sheetContent}
       indicatorStyle={styles.indicator}
       onClose={_handleOnSheetClose}
     >
+      <ModalHeader title={intl.formatMessage({ id: 'post_dropdown.translate' })} />
+
       <View style={styles.listContainer}>
-        <View style={styles.languageSelectorRow}>
-          {!isLoadingLangsList && supportedLangsList && supportedLangsList.length
-            ? _renderLanguageSelector()
-            : null}
+        {_renderLanguageSelector()}
+
+        <View style={styles.origTextContainer}>
+          <Text style={styles.origText} numberOfLines={3}>
+            {originalText}
+          </Text>
         </View>
-        <View style={styles.translatedTextContainer}>
-          {isLoadingTranslation ? (
-            <ActivityIndicator
-              style={{ paddingHorizontal: 24, paddingBottom: 8 }}
-              size="small"
-              color={EStyleSheet.value('$iconColor')}
-            />
-          ) : (
-            <Text style={styles.translatedText}>{translationError || translatedPost}</Text>
-          )}
-        </View>
+
+        {_renderTranslation()}
       </View>
     </ActionSheet>
   );

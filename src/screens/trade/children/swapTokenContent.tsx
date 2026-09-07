@@ -1,46 +1,41 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, Alert, RefreshControl } from 'react-native';
 import { useIntl } from 'react-intl';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import EStyleSheet from 'react-native-extended-stylesheet';
 import { useNavigation } from '@react-navigation/native';
+import { SheetManager } from 'react-native-actions-sheet';
 import styles from '../styles/tradeScreen.styles';
 import { AssetChangeBtn, ErrorSection, SwapAmountInput, SwapFeeSection } from '.';
-import { HiveAuthModal, Icon, MainButton } from '../../../components';
+import { Icon, MainButton } from '../../../components';
+import { fetchHiveMarketRate } from '../../../providers/hive-trade/hiveTrade';
+import { useAppSelector } from '../../../hooks';
 import {
-  fetchHiveMarketRate,
-  generateHsSwapTokenPath,
-  swapToken,
-} from '../../../providers/hive-trade/hiveTrade';
-import { useAppDispatch, useAppSelector } from '../../../hooks';
-import { MarketAsset, SwapOptions } from '../../../providers/hive-trade/hiveTrade.types';
-import { ASSET_IDS } from '../../../constants/defaultAssets';
-import { showActionModal } from '../../../redux/actions/uiAction';
+  MarketAsset,
+  OrderIdPrefix,
+  SwapOptions,
+} from '../../../providers/hive-trade/hiveTrade.types';
 import { walletQueries } from '../../../providers/queries';
 import { useSwapCalculator } from './useSwapCalculator';
-import AUTH_TYPE from '../../../constants/authType';
 import { delay } from '../../../utils/editor';
-import { buildTradeOpsArray } from '../../../utils/transactionOpsBuilder';
+import { SheetNames } from '../../../navigation/sheets';
+import { convertSwapOptionsToLimitOrder } from '../../../providers/hive-trade/converters';
+import { useLimitOrderCreateMutation } from '../../../providers/sdk/mutations';
+import { selectCurrency, selectIsDarkTheme } from '../../../redux/selectors';
 
 interface Props {
   initialSymbol: MarketAsset;
-  handleHsTransfer: (hsSignPath: string) => void;
   onSuccess: () => void;
 }
 
-export const SwapTokenContent = ({ initialSymbol, handleHsTransfer, onSuccess }: Props) => {
+export const SwapTokenContent = ({ initialSymbol, onSuccess }: Props) => {
   const intl = useIntl();
-  const dispatch = useAppDispatch();
   const navigation = useNavigation();
 
-  const hiveAuthModalRef = useRef();
+  const currency = useAppSelector(selectCurrency);
+  const isDarkTheme = useAppSelector(selectIsDarkTheme);
 
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const currency = useAppSelector((state) => state.application.currency);
-
-  const assetsData = useAppSelector((state) => state.wallet.coinsData);
-  const pinHash = useAppSelector((state) => state.application.pin);
-  const isDarkTheme = useAppSelector((state) => state.application.isDarkTheme);
+  const limitOrderCreate = useLimitOrderCreateMutation();
 
   const [fromAssetSymbol, setFromAssetSymbol] = useState(initialSymbol || MarketAsset.HIVE);
   const [marketPrice, setMarketPrice] = useState(0);
@@ -50,17 +45,14 @@ export const SwapTokenContent = ({ initialSymbol, handleHsTransfer, onSuccess }:
   const [swapping, setSwapping] = useState(false);
   const [fromAmount, setFromAmount] = useState('0');
 
-  const _toAssetSymbol = useMemo(
+  const toAssetSymbol = useMemo(
     () => (fromAssetSymbol === MarketAsset.HBD ? MarketAsset.HIVE : MarketAsset.HBD),
     [fromAssetSymbol],
   );
 
-  const _fromAssetId = fromAssetSymbol === MarketAsset.HBD ? ASSET_IDS.HBD : ASSET_IDS.HIVE;
-  const _toAssetId = _toAssetSymbol === MarketAsset.HBD ? ASSET_IDS.HBD : ASSET_IDS.HIVE;
-
   // queres
   const assetsQuery = walletQueries.useAssetsQuery();
-  const pendingRequestsQuery = walletQueries.usePendingRequestsQuery(_fromAssetId);
+  const pendingRequestsQuery = walletQueries.usePendingRequestsQuery(fromAssetSymbol);
 
   // this method makes sure amount is only updated when new order book is fetched after asset change
   // this avoid wrong from and to swap value on changing source asset
@@ -90,11 +82,19 @@ export const SwapTokenContent = ({ initialSymbol, handleHsTransfer, onSuccess }:
   }, [tooMuchSlippage, offerUnavailable, isMoreThanBalance]);
 
   // accumulate asset data properties
-  const _fromAssetData = assetsData[_fromAssetId];
-  const _balance = _fromAssetData.balance;
-  const _fromFiatPrice = _fromAssetData.currentPrice;
-  const _toFiatPrice = assetsData[_toAssetId].currentPrice;
-  const _marketFiatPrice = marketPrice * _toFiatPrice;
+  const _fromAssetData = useMemo(
+    () => assetsQuery.getAssetBySymbol(fromAssetSymbol),
+    [assetsQuery.data, fromAssetSymbol],
+  );
+  const _toAssetData = useMemo(
+    () => assetsQuery.getAssetBySymbol(toAssetSymbol),
+    [assetsQuery.data, toAssetSymbol],
+  );
+
+  const _balance = _fromAssetData?.liquid || 0;
+  const _fromFiatRate = _fromAssetData?.fiatRate || 0;
+  const _toFiatRate = _toAssetData?.fiatRate || 0;
+  const _marketFiatPrice = marketPrice * _toFiatRate;
 
   const _toAmountStr = toAmount.toFixed(3);
 
@@ -118,10 +118,11 @@ export const SwapTokenContent = ({ initialSymbol, handleHsTransfer, onSuccess }:
       // TODO: update marketPrice
       const _marketPrice = await fetchHiveMarketRate(fromAssetSymbol);
       setMarketPrice(_marketPrice);
-
-      setLoading(false);
     } catch (err) {
-      Alert.alert('fail', err.message);
+      const message = err instanceof Error ? err.message : String(err);
+      Alert.alert(intl.formatMessage({ id: 'alert.market_data_load_failed' }), message);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -154,8 +155,9 @@ export const SwapTokenContent = ({ initialSymbol, handleHsTransfer, onSuccess }:
         />
       </View>
     );
-    dispatch(
-      showActionModal({
+
+    SheetManager.show(SheetNames.ACTION_MODAL, {
+      payload: {
         headerContent,
         title: intl.formatMessage({ id: _titleId }),
         body: _body,
@@ -163,12 +165,14 @@ export const SwapTokenContent = ({ initialSymbol, handleHsTransfer, onSuccess }:
           { textId: 'trade.new_swap', onPress: _reset },
           { textId: 'alert.done', onPress: () => navigation.goBack() },
         ],
-      }),
-    );
+      },
+    });
   };
 
   // initiates swaping action on confirmation
   const _confirmSwap = async () => {
+    if (swapping) return;
+
     const _fromAmount = Number(fromAmount);
 
     const data: SwapOptions = {
@@ -177,57 +181,96 @@ export const SwapTokenContent = ({ initialSymbol, handleHsTransfer, onSuccess }:
       toAmount,
     };
 
-    if (currentAccount.local.authType === AUTH_TYPE.STEEM_CONNECT) {
-      await delay(500); // NOTE: it's required to avoid modal mis fire
-      handleHsTransfer(generateHsSwapTokenPath(currentAccount, data));
-    } else if (currentAccount.local.authType === AUTH_TYPE.HIVE_AUTH) {
-      await delay(500); // NOTE: it's required to avoid modal mis fire
-      const opsArray = buildTradeOpsArray(currentAccount.username, data);
-      hiveAuthModalRef.current?.broadcastActiveOps(opsArray);
-    } else {
-      try {
-        setSwapping(true);
+    try {
+      setSwapping(true);
 
-        await swapToken(currentAccount, pinHash, data);
+      const { amountToSell, minToReceive } = convertSwapOptionsToLimitOrder(data);
 
-        await delay(1000);
-        const _existingPedingCount = pendingRequestsQuery.data?.length || 0;
-        const pendingRequests = await pendingRequestsQuery.refetch();
-        const _hasPending = pendingRequests.data?.length !== _existingPedingCount;
+      const expirationDate = new Date(Date.now());
+      expirationDate.setDate(expirationDate.getDate() + 27);
+      const [expiration] = expirationDate.toISOString().split('.');
 
-        onSuccess();
-        setSwapping(false);
-        _onSwapSuccess(_hasPending);
-      } catch (err) {
-        Alert.alert('fail', err.message);
-        setSwapping(false);
+      // Hive order IDs must be uint32 (max 4,294,967,295). Prefix '9' identifies swap orders.
+      // Use last 8 digits of ms timestamp for ~27h uniqueness window (per-account, no collision risk).
+      const numericOrderId = parseInt(`${OrderIdPrefix.SWAP}${Date.now() % 100000000}`, 10);
+
+      await limitOrderCreate.mutateAsync({
+        amountToSell: `${amountToSell.toFixed(3)} ${fromAssetSymbol}`,
+        minToReceive: `${minToReceive.toFixed(3)} ${toAssetSymbol}`,
+        fillOrKill: false,
+        expiration,
+        orderId: numericOrderId,
+      });
+
+      await delay(1000);
+      const _existingPendingCount = pendingRequestsQuery.data?.length || 0;
+      const refetchResult = await pendingRequestsQuery.refetch();
+      const _latestPendingCount =
+        (refetchResult as any).data?.length ?? pendingRequestsQuery.data?.length ?? 0;
+      const _hasPending = _latestPendingCount !== _existingPendingCount;
+
+      onSuccess();
+      _onSwapSuccess(_hasPending);
+    } catch (err) {
+      // On timeout/abort the tx may have already landed on-chain.
+      // Check if a new pending order appeared before declaring failure.
+      const errMsg = err instanceof Error ? err.message : String(err ?? '');
+      const isAbort = errMsg === 'Aborted' || /aborted|timeout|TimeoutError/i.test(errMsg);
+
+      if (isAbort) {
+        try {
+          await delay(3000);
+          const refetchResult = await pendingRequestsQuery.refetch();
+          const _existingCount = pendingRequestsQuery.data?.length || 0;
+          const _latestCount = (refetchResult as any).data?.length ?? _existingCount;
+          if (_latestCount !== _existingCount) {
+            // Order appeared — the broadcast actually succeeded
+            onSuccess();
+            _onSwapSuccess(_latestCount !== _existingCount);
+            return;
+          }
+        } catch (_e) {
+          // recovery check failed, fall through to error
+        }
       }
+
+      const message =
+        err instanceof Error
+          ? err.message
+          : typeof err === 'object' && err !== null && 'message' in err
+          ? String((err as any).message)
+          : String(err);
+      Alert.alert(intl.formatMessage({ id: 'alert.swap_failed' }), message);
+    } finally {
+      setSwapping(false);
     }
   };
 
   // prompts user to verify swap action;
-  const handleContinue = () => {
-    dispatch(
-      showActionModal({
+  const handleContinue = async () => {
+    const action = await SheetManager.show(SheetNames.ACTION_MODAL, {
+      payload: {
         title: intl.formatMessage({ id: 'trade.confirm_swap' }),
         body: intl.formatMessage(
           { id: 'trade.swap_for' },
           {
             fromAmount: `${fromAmount} ${fromAssetSymbol}`,
-            toAmount: `${_toAmountStr} ${_toAssetSymbol}`,
+            toAmount: `${_toAmountStr} ${toAssetSymbol}`,
           },
         ),
         buttons: [
           {
             textId: 'alert.cancel',
-            onPress: () => {
-              console.log('cancel pressed');
-            },
+            returnValue: 'cancel',
           },
-          { textId: 'alert.confirm', onPress: _confirmSwap },
+          { textId: 'alert.confirm', returnValue: 'confirm' },
         ],
-      }),
-    );
+      },
+    });
+
+    if (action === 'confirm') {
+      _confirmSwap();
+    }
   };
 
   // refreshes wallet data and market rate
@@ -238,7 +281,7 @@ export const SwapTokenContent = ({ initialSymbol, handleHsTransfer, onSuccess }:
   };
 
   const handleAssetChange = () => {
-    setFromAssetSymbol(_toAssetSymbol);
+    setFromAssetSymbol(toAssetSymbol);
   };
 
   const _disabledContinue =
@@ -270,14 +313,14 @@ export const SwapTokenContent = ({ initialSymbol, handleHsTransfer, onSuccess }:
         onChangeText={setFromAmount}
         value={fromAmount}
         symbol={fromAssetSymbol}
-        fiatPrice={_fromFiatPrice}
+        fiatRate={_fromFiatRate}
       />
 
       <SwapAmountInput
         label={intl.formatMessage({ id: 'transfer.to' })}
         value={_toAmountStr}
-        symbol={_toAssetSymbol}
-        fiatPrice={_toFiatPrice}
+        symbol={toAssetSymbol}
+        fiatRate={_toFiatRate}
       />
       <AssetChangeBtn onPress={handleAssetChange} />
     </View>
@@ -299,7 +342,7 @@ export const SwapTokenContent = ({ initialSymbol, handleHsTransfer, onSuccess }:
   const _renderMarketPrice = () => (
     <Text style={styles.marketRate}>
       {`1 ${fromAssetSymbol} = ${marketPrice.toFixed(3)} ` +
-        `${_toAssetSymbol} (${currency.currencySymbol + _marketFiatPrice.toFixed(3)})`}
+        `${toAssetSymbol} (${currency.currencySymbol + _marketFiatPrice.toFixed(3)})`}
     </Text>
   );
 
@@ -325,8 +368,6 @@ export const SwapTokenContent = ({ initialSymbol, handleHsTransfer, onSuccess }:
       <ErrorSection message={_errorMessage} />
 
       {_renderMainBtn()}
-
-      <HiveAuthModal ref={hiveAuthModalRef} onClose={() => navigation.goBack()} />
     </KeyboardAwareScrollView>
   );
 };

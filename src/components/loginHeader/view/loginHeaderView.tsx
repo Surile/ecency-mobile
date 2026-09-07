@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { View, Text, Image, SafeAreaView } from 'react-native';
+import { View, Text, Image } from 'react-native';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -10,12 +10,13 @@ import Animated, {
 // Constants
 
 // Components
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { LineBreak } from '../../basicUIElements';
 // Styles
 import styles from './loginHeaderStyles';
 import { IconButton } from '../..';
 
-const LoginHeaderView = ({ description, isKeyboardOpen, title, onBackPress }) => {
+const LoginHeaderView = ({ description, isKeyboardOpen, title, onBackPress }: any) => {
   // Shared value to track animation progress
   const progress = useSharedValue(isKeyboardOpen ? 0 : 1);
 
@@ -36,8 +37,8 @@ const LoginHeaderView = ({ description, isKeyboardOpen, title, onBackPress }) =>
   });
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View styles={styles.container}>
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
+      <View>
         <View style={styles.headerRow}>
           <View style={styles.backIconContainer}>
             <IconButton

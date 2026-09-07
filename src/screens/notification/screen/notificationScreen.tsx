@@ -18,12 +18,16 @@ const NotificationScreen = ({
   readAllNotification,
   isNotificationRefreshing,
   isLoading,
+  isFetching,
+  isError,
+  error,
   changeSelectedFilter,
   globalProps,
-}) => {
+}: any) => {
   const intl = useIntl();
 
   const [index, setIndex] = React.useState(0);
+  const notificationsListRef = React.useRef<any>(null);
   const [routes] = React.useState([
     {
       key: 'notifications',
@@ -39,7 +43,7 @@ const NotificationScreen = ({
     },
   ]);
 
-  const renderScene = ({ route }) => {
+  const renderScene = ({ route }: any) => {
     switch (route.key) {
       case 'notifications':
         return (
@@ -54,8 +58,12 @@ const NotificationScreen = ({
                   readAllNotification={readAllNotification}
                   isNotificationRefreshing={isNotificationRefreshing}
                   isLoading={isLoading}
+                  isFetching={isFetching}
+                  isError={isError}
+                  error={error}
                   changeSelectedFilter={changeSelectedFilter}
                   globalProps={globalProps}
+                  listRef={notificationsListRef}
                 />
               )}
             </LoggedInContainer>
@@ -77,7 +85,22 @@ const NotificationScreen = ({
       <TabView
         navigationState={{ index, routes }}
         style={styles.tabView}
-        renderTabBar={TabBar}
+        renderTabBar={(tabProps) => (
+          <TabBar
+            {...tabProps}
+            onTabPress={({ route }) => {
+              if (route.key === 'notifications') {
+                if (!notifications || notifications.length === 0) {
+                  return;
+                }
+                notificationsListRef.current?.scrollToOffset({
+                  offset: 0,
+                  animated: true,
+                });
+              }
+            }}
+          />
+        )}
         onIndexChange={setIndex}
         renderScene={renderScene}
         commonOptions={{

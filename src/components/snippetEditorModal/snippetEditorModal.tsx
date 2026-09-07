@@ -1,10 +1,11 @@
 import React, { forwardRef, useImperativeHandle, useRef, useState } from 'react';
 import { useIntl } from 'react-intl';
 import { Alert, KeyboardAvoidingView, Platform, View } from 'react-native';
-import { useSelector } from 'react-redux';
 import { TextInput } from '..';
 import { Snippet } from '../../models';
 import { editorQueries } from '../../providers/queries';
+import { selectIsDarkTheme } from '../../redux/selectors';
+import { useAppSelector } from '../../hooks';
 import { TextButton } from '../buttons';
 import Modal from '../modal';
 import styles from './snippetEditorModalStyles';
@@ -14,10 +15,10 @@ export interface SnippetEditorModalRef {
   showEditModal: (snippet: Snippet) => void;
 }
 // eslint-disable-next-line no-empty-pattern
-const SnippetEditorModal = ({}, ref) => {
+const SnippetEditorModal = ({}, ref: any) => {
   const intl = useIntl();
-  const titleInputRef = useRef(null);
-  const bodyInputRef = useRef(null);
+  const titleInputRef = useRef<any>(null);
+  const bodyInputRef = useRef<any>(null);
 
   const snippetsMutation = editorQueries.useSnippetsMutation();
 
@@ -27,19 +28,29 @@ const SnippetEditorModal = ({}, ref) => {
   const [isNewSnippet, setIsNewSnippet] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [titleHeight, setTitleHeight] = useState(0);
-  const isDarkTheme = useSelector((state) => state.application.isDarkTheme);
+  const isDarkTheme = useAppSelector(selectIsDarkTheme);
+
+  const _setTitleText = (text: string) => {
+    setTitle(text);
+    titleInputRef.current?.setNativeProps({ text });
+  };
+
+  const _setBodyText = (text: string) => {
+    setBody(text);
+    bodyInputRef.current?.setNativeProps({ text });
+  };
 
   useImperativeHandle(ref, () => ({
     showNewModal: () => {
-      setTitle('');
-      setBody('');
+      _setTitleText('');
+      _setBodyText('');
       setIsNewSnippet(true);
       setShowModal(true);
     },
     showEditModal: (snippet: Snippet) => {
       setSnippetId(snippet.id);
-      setTitle(snippet.title);
-      setBody(snippet.body);
+      _setTitleText(snippet.title);
+      _setBodyText(snippet.body);
       setIsNewSnippet(false);
       setShowModal(true);
     },
@@ -66,8 +77,8 @@ const SnippetEditorModal = ({}, ref) => {
   const _renderContent = (
     <KeyboardAvoidingView
       style={styles.container}
-      keyboardVerticalOffset={Platform.OS == 'ios' ? 64 : null}
-      behavior={Platform.OS === 'ios' ? 'padding' : null}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <View style={styles.inputContainer}>
         <View style={{ height: Math.max(35, titleHeight) }}>
@@ -82,25 +93,26 @@ const SnippetEditorModal = ({}, ref) => {
             multiline
             numberOfLines={2}
             onContentSizeChange={(event) => {
-              setTitleHeight(event.nativeEvent.contentSize.height);
+              const nextHeight = event.nativeEvent.contentSize.height;
+              setTitleHeight((prev) => (prev === nextHeight ? prev : nextHeight));
             }}
             onChangeText={setTitle}
-            value={title}
+            defaultValue={title}
           />
         </View>
 
         <TextInput
           multiline
           autoCorrect={true}
-          value={body}
           onChangeText={setBody}
+          defaultValue={body}
           placeholder={intl.formatMessage({ id: 'snippets.placeholder_body' })}
           placeholderTextColor={isDarkTheme ? '#526d91' : '#c1c5c7'}
           selectionColor="#357ce6"
           style={styles.bodyWrapper}
           underlineColorAndroid="transparent"
           innerRef={bodyInputRef}
-          autoGrow={false}
+          {...({ autoGrow: false } as any)}
           scrollEnabled={false}
           height={100}
         />

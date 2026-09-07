@@ -1,11 +1,10 @@
 import { PointActivity } from '../../providers/ecency/ecency.types';
 import {
   PURGE_EXPIRED_CACHE,
-  UPDATE_VOTE_CACHE,
-  UPDATE_COMMENT_CACHE,
-  DELETE_COMMENT_CACHE_ENTRY,
   DELETE_DRAFT_CACHE_ENTRY,
   UPDATE_DRAFT_CACHE,
+  UPDATE_REPLY_CACHE,
+  DELETE_REPLY_CACHE_ENTRY,
   UPDATE_SUBSCRIBED_COMMUNITY_CACHE,
   DELETE_SUBSCRIBED_COMMUNITY_CACHE,
   CLEAR_SUBSCRIBED_COMMUNITIES_CACHE,
@@ -14,6 +13,7 @@ import {
   UPDATE_CLAIM_CACHE,
   DELETE_CLAIM_CACHE_ENTRY,
   UPDATE_ANNOUNCEMENTS_META,
+  UPDATE_SPOTLIGHT_META,
   UPDATE_POLL_VOTE_CACHE,
   UPDATE_PROPOSALS_VOTE_META,
 } from '../constants/constants';
@@ -47,30 +47,6 @@ export interface PollVoteCache {
   status: CacheStatus;
 }
 
-export interface Comment {
-  author: string;
-  permlink: string;
-  parent_author: string;
-  parent_permlink: string;
-  body?: string;
-  markdownBody: string;
-  author_reputation?: number;
-  total_payout?: number;
-  net_rshares?: number;
-  active_votes?: Array<{ rshares: number; voter: string }>;
-  replies?: string[];
-  children?: number;
-  json_metadata?: any;
-  isDeletable?: boolean;
-  created?: string; // handle created and updated separatly
-  updated?: string;
-  expiresAt?: number;
-  expandedReplies?: boolean;
-  renderOnTop?: boolean;
-  status: CacheStatus;
-  url?: string;
-}
-
 export interface Draft {
   author: string;
   body: string;
@@ -83,7 +59,7 @@ export interface Draft {
 }
 
 export interface ClaimCache {
-  rewardValue: string;
+  rewardValue: number;
   claimedAt?: number;
   expiresAt?: number;
 }
@@ -102,6 +78,11 @@ export interface AnnouncementMeta {
   processed: boolean;
 }
 
+export interface SpotlightMeta {
+  lastSeen: number;
+  dismissed: boolean;
+}
+
 export interface ProposalVoteMeta {
   dismissedAt: number;
   processed: boolean;
@@ -113,66 +94,37 @@ export interface LastUpdateMeta {
   type: 'vote' | 'comment' | 'draft' | 'poll-vote';
 }
 
-interface State {
+export interface State {
   votesCollection: { [key: string]: VoteCache };
-  commentsCollection: { [key: string]: Comment };
   pollVotesCollection: { [key: string]: PollVoteCache };
   draftsCollection: { [key: string]: Draft };
+  replyCache: { [key: string]: Draft }; // For waves and reply autosave
   claimsCollection: ClaimsCollection;
   subscribedCommunities: Map<string, SubscribedCommunity>;
   pointActivities: Map<string, PointActivity>;
   announcementsMeta: { [key: string]: AnnouncementMeta };
+  spotlightMeta: { [key: string]: SpotlightMeta };
   proposalsVoteMeta: { [key: string]: ProposalVoteMeta }; // proposal cache id: [proposalId]_[username]
-  lastUpdate: LastUpdateMeta;
+  lastUpdate: LastUpdateMeta | null;
 }
 
 const initialState: State = {
   votesCollection: {},
-  commentsCollection: {},
   pollVotesCollection: {},
   draftsCollection: {},
+  replyCache: {},
   claimsCollection: {},
   announcementsMeta: {},
+  spotlightMeta: {},
   proposalsVoteMeta: {},
   subscribedCommunities: new Map(),
   pointActivities: new Map(),
   lastUpdate: null,
 };
 
-const cacheReducer = (state = initialState, action) => {
+const cacheReducer = (state = initialState, action: any) => {
   const { type, payload } = action;
   switch (type) {
-    case UPDATE_VOTE_CACHE:
-      if (!state.votesCollection) {
-        state.votesCollection = {};
-      }
-      state.votesCollection = { ...state.votesCollection, [payload.postPath]: payload.vote };
-      return {
-        ...state, // spread operator in requried here, otherwise persist do not register change
-        lastUpdate: {
-          postPath: payload.postPath,
-          updatedAt: new Date().getTime(),
-          type: 'vote',
-        },
-      };
-
-    case UPDATE_COMMENT_CACHE:
-      if (!state.commentsCollection) {
-        state.commentsCollection = {};
-      }
-      state.commentsCollection = {
-        ...state.commentsCollection,
-        [payload.commentPath]: payload.comment,
-      };
-      return {
-        ...state, // spread operator in requried here, otherwise persist do not register change
-        lastUpdate: {
-          postPath: payload.commentPath,
-          updatedAt: new Date().getTime(),
-          type: 'comment',
-        },
-      };
-
     case UPDATE_POLL_VOTE_CACHE:
       if (!state.pollVotesCollection) {
         state.pollVotesCollection = {};
@@ -189,12 +141,6 @@ const cacheReducer = (state = initialState, action) => {
           type: 'poll-vote',
         },
       };
-
-    case DELETE_COMMENT_CACHE_ENTRY:
-      if (state.commentsCollection && state.commentsCollection[payload]) {
-        delete state.commentsCollection[payload];
-      }
-      return { ...state };
 
     case UPDATE_DRAFT_CACHE:
       if (!payload.id || !payload.draft) {
@@ -226,6 +172,40 @@ const cacheReducer = (state = initialState, action) => {
     case DELETE_DRAFT_CACHE_ENTRY:
       if (state.draftsCollection && state.draftsCollection[payload]) {
         delete state.draftsCollection[payload];
+      }
+      return { ...state };
+
+    case UPDATE_REPLY_CACHE: {
+      if (!payload.id || !payload.draft) {
+        return state;
+      }
+
+      if (!state.replyCache) {
+        state.replyCache = {};
+      }
+
+      const replyTime = new Date().getTime();
+      const curReply = state.replyCache[payload.id];
+      const payloadReply = payload.draft;
+
+      payloadReply.created = curReply?.created || replyTime;
+      payloadReply.updated = replyTime;
+      payloadReply.expiresAt = replyTime + 604800000; // 7 days ms
+
+      state.replyCache[payload.id] = payloadReply;
+      return {
+        ...state, // spread operator in requried here, otherwise persist do not register change
+        lastUpdate: {
+          postPath: payload.id,
+          updatedAt: new Date().getTime(),
+          type: 'draft',
+        },
+      };
+    }
+
+    case DELETE_REPLY_CACHE_ENTRY:
+      if (state.replyCache && state.replyCache[payload]) {
+        delete state.replyCache[payload];
       }
       return { ...state };
 
@@ -329,6 +309,25 @@ const cacheReducer = (state = initialState, action) => {
         ...state, // spread operator in requried here, otherwise persist do not register change
       };
 
+    case UPDATE_SPOTLIGHT_META: {
+      if (!state.spotlightMeta) {
+        state.spotlightMeta = {};
+      }
+
+      const _alreadyDismissed = state.spotlightMeta[payload.id]?.dismissed || false;
+
+      state.spotlightMeta = {
+        ...state.spotlightMeta,
+        [payload.id]: {
+          dismissed: _alreadyDismissed || payload.dismissed,
+          lastSeen: new Date().getTime(),
+        } as SpotlightMeta,
+      };
+      return {
+        ...state, // spread operator in requried here, otherwise persist do not register change
+      };
+    }
+
     case PURGE_EXPIRED_CACHE:
       const currentTime = new Date().getTime();
 
@@ -337,15 +336,6 @@ const cacheReducer = (state = initialState, action) => {
           const vote = state.votesCollection[key];
           if (vote && (vote?.expiresAt || 0) < currentTime) {
             delete state.votesCollection[key];
-          }
-        });
-      }
-
-      if (state.commentsCollection) {
-        Object.keys(state.commentsCollection).forEach((key) => {
-          const comment = state.commentsCollection[key];
-          if (comment && (comment?.expiresAt || 0) < currentTime) {
-            delete state.commentsCollection[key];
           }
         });
       }
@@ -368,6 +358,15 @@ const cacheReducer = (state = initialState, action) => {
         });
       }
 
+      if (state.replyCache) {
+        Object.keys(state.replyCache).forEach((key) => {
+          const reply = state.replyCache[key];
+          if (reply && ((reply?.expiresAt || 0) < currentTime || !reply.body)) {
+            delete state.replyCache[key];
+          }
+        });
+      }
+
       if (state.claimsCollection) {
         Object.keys(state.claimsCollection).forEach((key) => {
           const claim = state.claimsCollection[key];
@@ -379,7 +378,7 @@ const cacheReducer = (state = initialState, action) => {
 
       if (state.subscribedCommunities && state.subscribedCommunities.size) {
         Array.from(state.subscribedCommunities).forEach((entry) => {
-          if (entry[1].expiresAt < currentTime) {
+          if ((entry[1].expiresAt || 0) < currentTime) {
             state.subscribedCommunities.delete(entry[0]);
           }
         });

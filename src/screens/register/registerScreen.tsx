@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { View, Platform, Text, Keyboard, KeyboardAvoidingView, Alert } from 'react-native';
 import { useIntl } from 'react-intl';
-import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
 import { debounce } from 'lodash';
 // Internal Components
+import { lookupAccountsQueryOptions } from '@ecency/sdk';
+import { useQueryClient } from '@tanstack/react-query';
 import { FormInput, InformationArea, LoginHeader, MainButton } from '../../components';
 
 // Constants
@@ -13,15 +14,19 @@ import ROUTES from '../../constants/routeNames';
 import styles from './registerStyles';
 import { RegisterAccountModal } from './children/registerAccountModal';
 import { ECENCY_TERMS_URL } from '../../config/ecencyApi';
-import { lookupAccounts } from '../../providers/hive/dhive';
 import { useAppSelector } from '../../hooks';
+import { selectIsConnected } from '../../redux/selectors';
+import { getUsernameError, USERNAME_ERROR_MESSAGE_IDS } from '../../utils/usernameValidation';
 
-const RegisterScreen = ({ navigation, route }) => {
+const RegisterScreen = ({ navigation, route }: any) => {
   const intl = useIntl();
+  const queryClient = useQueryClient();
 
-  const registerAccountModalRef = useRef(null);
+  const registerAccountModalRef = useRef<any>(null);
+  const usernameInputRef = useRef<any>(null);
+  const refUsernameInputRef = useRef<any>(null);
 
-  const isConnected = useAppSelector((state) => state.application.isConnected);
+  const isConnected = useAppSelector(selectIsConnected);
 
   const [keyboardIsOpen, setKeyboardIsOpen] = useState(false);
   const [username, setUsername] = useState(route.params?.username ?? '');
@@ -48,30 +53,31 @@ const RegisterScreen = ({ navigation, route }) => {
   }, []);
 
   useEffect(() => {
-    if (registerAccountModalRef.current) {
-      const { purchaseOnly, email, username, referredUser } = route.params || {};
-      if (email) {
-        _handleEmailChange(email);
-      }
-      if (username) {
-        _handleUsernameChange({ value: username });
-      }
-      if (referredUser) {
-        _handleRefUsernameChange({ value: referredUser });
-      }
-      if (purchaseOnly && email && username) {
-        registerAccountModalRef.current.showModal({ purchaseOnly });
-      }
+    const { purchaseOnly, email, username, referredUser } = route.params || {};
+    if (email) {
+      _handleEmailChange(email);
     }
-  }, [registerAccountModalRef]);
+    if (username) {
+      _handleUsernameChange({ value: username });
+    }
+    if (referredUser) {
+      _handleRefUsernameChange({ value: referredUser });
+    }
+    // deep-link / purchase-recovery entry: apply the same synchronous rule
+    // check as the Continue button so a chain-invalid username can't reach
+    // the purchase modal through route params either
+    if (purchaseOnly && email && username && !getUsernameError(username.toLowerCase())) {
+      registerAccountModalRef.current?.showModal({ purchaseOnly });
+    }
+  }, []);
 
-  const _getAccountsWithUsername = async (username) => {
+  const _getAccountsWithUsername = async (username: any) => {
     if (!isConnected) {
       return null;
     }
 
     try {
-      const validUsers = await lookupAccounts(username);
+      const validUsers = await queryClient.fetchQuery(lookupAccountsQueryOptions(username));
 
       return validUsers;
     } catch (error) {
@@ -82,53 +88,24 @@ const RegisterScreen = ({ navigation, route }) => {
     }
   };
 
-  const _handleEmailChange = (value) => {
+  const _handleEmailChange = (value: any) => {
     const re =
       /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
     setIsEmailValid(re.test(value));
     setEmail(value);
   };
 
-  const _isValidUsername = (value) => {
-    if (!value || value.length <= 2 || value.length >= 16) {
-      setUsernameError(intl.formatMessage({ id: 'register.validation.username_length_error' }));
+  const _isValidUsername = (value: any) => {
+    const errorCode = getUsernameError(value);
+    if (errorCode) {
+      setUsernameError(intl.formatMessage({ id: USERNAME_ERROR_MESSAGE_IDS[errorCode] }));
       return false;
-    } else {
-      return value.split('.').some((item) => {
-        if (item.length < 3) {
-          setUsernameError(intl.formatMessage({ id: 'register.validation.username_length_error' }));
-          return false;
-        } else if (!/^[\x00-\x7F]*$/.test(item[0])) {
-          setUsernameError(
-            intl.formatMessage({ id: 'register.validation.username_no_ascii_first_letter_error' }),
-          );
-          return false;
-        } else if (!/^([a-zA-Z0-9]|-|\.)+$/.test(item)) {
-          setUsernameError(
-            intl.formatMessage({ id: 'register.validation.username_contains_symbols_error' }),
-          );
-          return false;
-        } else if (item.includes('--')) {
-          setUsernameError(
-            intl.formatMessage({ id: 'register.validation.username_contains_double_hyphens' }),
-          );
-          return false;
-        } else if (item.includes('_')) {
-          setUsernameError(
-            intl.formatMessage({ id: 'register.validation.username_contains_underscore' }),
-          );
-          return false;
-        } else {
-          return true;
-        }
-      });
     }
+    setUsernameError('');
+    return true;
   };
 
-  const _handleUsernameChange = ({ value }) => {
-    value = value.toLowerCase();
-    setUsername(value);
-
+  const _validateUsername = (value: any) => {
     if (!_isValidUsername(value)) {
       setIsUserExist(false);
       setIsUsernameValid(false);
@@ -136,30 +113,49 @@ const RegisterScreen = ({ navigation, route }) => {
     }
 
     _getAccountsWithUsername(value).then((res) => {
-      const isValid = !res.includes(value);
-      if (!isValid) {
+      const isValid = res ? !res.includes(value) : false;
+      if (!isValid && res) {
         setUsernameError(intl.formatMessage({ id: 'register.validation.username_exists' }));
       }
       setIsUserExist(!isValid);
       setIsUsernameValid(isValid);
     });
   };
-  const changeTextDebouncer = useCallback(debounce(_handleUsernameChange, 500), []);
+  const debouncedValidateUsername = useCallback(debounce(_validateUsername, 500), []);
 
-  const _handleRefUsernameChange = ({ value }) => {
-    value = value.toLowerCase();
-    setRefUsername(value);
-    if (!value) {
+  const _handleUsernameChange = ({ value }: any) => {
+    const lower = value.toLowerCase();
+    if (lower !== value) {
+      usernameInputRef.current?.setText(lower);
+    }
+    setUsername(lower);
+    debouncedValidateUsername(lower);
+  };
+
+  const _handleRefUsernameChange = ({ value }: any) => {
+    const lower = value.toLowerCase();
+    if (lower !== value) {
+      refUsernameInputRef.current?.setText(lower);
+    }
+    setRefUsername(lower);
+    if (!lower) {
       setIsRefUsernameValid(true);
       return;
     }
-    _getAccountsWithUsername(value).then((res) => {
-      const isValid = res.includes(value);
+    _getAccountsWithUsername(lower).then((res) => {
+      const isValid = res ? res.includes(lower) : false;
       setIsRefUsernameValid(isValid);
     });
   };
 
   const _onContinuePress = () => {
+    // the button's disabled state lags behind the debounced validation, so a
+    // just-typed invalid name could otherwise still reach the signup/purchase
+    // modal — re-run the synchronous rule check before opening it
+    if (!_isValidUsername(username)) {
+      setIsUsernameValid(false);
+      return;
+    }
     Keyboard.dismiss();
     registerAccountModalRef.current?.showModal();
   };
@@ -184,17 +180,17 @@ const RegisterScreen = ({ navigation, route }) => {
         }}
       />
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : null}
         style={styles.formWrapper}
-        // keyboardShouldPersistTaps="always"
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         <View style={styles.body}>
           <FormInput
+            ref={usernameInputRef}
             rightIconName="at"
             leftIconName="close"
             iconType="MaterialCommunityIcons"
             isValid={isUsernameValid}
-            onChange={(value) => changeTextDebouncer({ value })}
+            onChange={(value) => _handleUsernameChange({ value })}
             placeholder={intl.formatMessage({
               id: 'register.username',
             })}
@@ -222,6 +218,7 @@ const RegisterScreen = ({ navigation, route }) => {
             onFocus={() => setKeyboardIsOpen(true)}
           />
           <FormInput
+            ref={refUsernameInputRef}
             rightIconName="person"
             leftIconName="close"
             isValid={isRefUsernameValid}
@@ -286,4 +283,4 @@ const RegisterScreen = ({ navigation, route }) => {
   );
 };
 
-export default gestureHandlerRootHOC(RegisterScreen);
+export default RegisterScreen;

@@ -1,19 +1,27 @@
 import React, { Component } from 'react';
 import { Platform, Alert, Appearance } from 'react-native';
 import { connect } from 'react-redux';
-import { Client } from '@hiveio/dhive';
-import VersionNumber from 'react-native-version-number';
+import { useQueryClient } from '@tanstack/react-query';
+
 import Config from 'react-native-config';
 import { injectIntl } from 'react-intl';
 import { getMessaging } from '@react-native-firebase/messaging';
 import { useNavigation } from '@react-navigation/native';
 import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
+import DeviceInfo from 'react-native-device-info';
+import { SheetManager } from 'react-native-actions-sheet';
+import {
+  saveNotificationSetting,
+  ConfigManager,
+  getSupportSettingsQueryOptions,
+  updateSupportSettingsRequest,
+  applySupportSettingsUpdate,
+} from '@ecency/sdk';
 import { languageRestart } from '../../../utils/I18nUtils';
 import THEME_OPTIONS from '../../../constants/options/theme';
 
 // Realm
 import {
-  getExistUser,
   setCurrency as setCurrency2DB,
   setServer,
   setNotificationSettings,
@@ -23,7 +31,7 @@ import {
   setAuthStatus,
   setExistUser,
   removeAllUserData,
-} from '../../../realm/realm';
+} from '../../../storage/storage';
 
 // Services and Actions
 import {
@@ -40,31 +48,65 @@ import {
   setEncryptedUnlockPin,
   setHidePostsThumbnails,
   setIsDarkTheme,
+  setImageServer,
 } from '../../../redux/actions/applicationActions';
+import { logout, logoutDone, toastNotification } from '../../../redux/actions/uiAction';
+import { deleteAccount } from '../../../providers/ecency/ecency';
 import {
-  logout,
-  logoutDone,
-  showActionModal,
-  toastNotification,
-} from '../../../redux/actions/uiAction';
-import { setPushToken, deleteAccount } from '../../../providers/ecency/ecency';
-import { checkClient } from '../../../providers/hive/dhive';
+  DEFAULT_SUPPORT_PERCENT,
+  SUPPORT_BENEFICIARY_PERCENTS,
+  SUPPORT_CURATION_PERCENTS,
+  isValidSupportSettings,
+} from '../../../providers/ecency/supportBeneficiary';
+import {
+  clearMattermostBootstrapCache,
+  getMattermostDmPrivacy,
+  updateMattermostDmPrivacy,
+  type MattermostDmPrivacy,
+} from '../../../providers/chat/mattermost';
+import { setChatApiToken } from '../../../config/chatApi';
+import { checkClient, getDigitPinCode } from '../../../providers/hive/hive';
 import { removeOtherAccount, updateCurrentAccount } from '../../../redux/actions/accountAction';
 import { useGetServersQuery } from '../../../providers/queries';
+import { useAuth } from '../../../hooks';
+import {
+  selectCurrentAccount,
+  selectIsLoggedIn,
+  selectIsDarkTheme,
+  selectLanguage,
+  selectCurrency,
+  selectIsPinCodeOpen,
+  selectOtherAccounts,
+  selectHidePostsThumbnails,
+  selectNotificationDetails,
+  selectPin,
+  selectEncUnlockPin,
+  selectIsNotificationOpen,
+  selectIsFCMAvailable,
+  selectApi,
+  selectIsBiometricEnabled,
+  selectColorTheme,
+  selectNsfw,
+  selectIsDefaultFooter,
+  selectImageServer,
+} from '../../../redux/selectors';
 // Middleware
 
 // Constants
 import { VALUE as CURRENCY_VALUE } from '../../../constants/options/currency';
 import { VALUE as LANGUAGE_VALUE } from '../../../constants/options/language';
+import { IMAGE_SERVERS } from '../../../constants/options/imageServer';
 import settingsTypes from '../../../constants/settingsTypes';
 
 // Utilities
 import { sendEmail } from '../../../utils/sendEmail';
 import { encryptKey, decryptKey } from '../../../utils/crypto';
+import { openStoreListing } from '../../../utils/storeReview';
 
 // Component
 import SettingsScreen from '../screen/settingsScreen';
 import ROUTES from '../../../constants/routeNames';
+import { SheetNames } from '../../../navigation/sheets';
 
 /*
  *            Props Name        Description                                     Value
@@ -72,18 +114,131 @@ import ROUTES from '../../../constants/routeNames';
  *
  */
 
-class SettingsContainer extends Component {
-  constructor(props) {
+class SettingsContainer extends Component<any, any> {
+  // Monotonic sequence for support settings fetches/saves. Only the latest
+  // operation may apply its response (or rollback) to state and cache, so an
+  // older request that settles late can never overwrite newer state. The
+  // counter is also bumped on account switch, invalidating in-flight work
+  // that belongs to the previous account.
+  _supportOpSeq = 0;
+
+  // saves are queued FIFO so full-payload updates can never reach the server
+  // out of order; a save superseded by a newer one is skipped before sending
+  _supportSaveSeq = 0;
+
+  _supportSaveChain: Promise<void> = Promise.resolve();
+
+  _focusUnsubscribe: (() => void) | null = null;
+
+  // Last server-acknowledged support settings (and the seq that produced
+  // them). Failed saves roll back HERE, never to the point-in-time snapshot
+  // taken when the save started: with two overlapping saves that both fail,
+  // that snapshot is the older save's unconfirmed optimistic value, which the
+  // server never accepted. Stale-but-successful saves still record their
+  // response (the server did apply it), guarded by seq so an older response
+  // cannot overwrite a newer acknowledgment or leak across account switches.
+  _confirmedSupportSettings: any = null;
+
+  _confirmedSupportSeq = 0;
+
+  constructor(props: any) {
     super(props);
     this.state = {
       isNotificationMenuOpen: props.isNotificationSettingsOpen,
       isLoading: false,
+      dmPrivacy: 'all',
+      // null = not loaded (or load failed); the support controls stay hidden
+      // until a load succeeds so a toggle can never do a read-modify-write
+      // against unknown values and wipe the other saved field
+      supportSettings: null,
     };
   }
 
+  async componentDidMount() {
+    const { isLoggedIn } = this.props as any;
+    if (!isLoggedIn) return;
+
+    // fire-and-forget: never rejects (guarded internally) and must not
+    // serialize the DM privacy fetch behind a slow support settings request
+    this._fetchSupportSettings();
+
+    // the editor chip can change the stored settings while this screen stays
+    // mounted in the stack; refetch on focus so a later partial save cannot
+    // merge against stale values. Chained behind queued saves so the fetch
+    // cannot observe pre-save server state.
+    const { navigation } = this.props as any;
+    this._focusUnsubscribe =
+      navigation?.addListener?.('focus', () => {
+        if (!(this.props as any).isLoggedIn) return;
+        this._supportSaveChain.then(() => this._fetchSupportSettings());
+      }) ?? null;
+
+    try {
+      const dmPrivacy = await getMattermostDmPrivacy();
+      this.setState({ dmPrivacy });
+    } catch {
+      // best-effort: keep default
+    }
+  }
+
+  componentDidUpdate(prevProps: any) {
+    const { username, isLoggedIn } = this.props as any;
+    // account switched while the screen stayed mounted: drop the previous
+    // account's values (hides the controls), invalidate in-flight support
+    // fetches/saves, and refetch for the newly selected account so a partial
+    // save can never write the previous account's percents to this one
+    if (prevProps.username !== username) {
+      this._supportOpSeq += 1;
+      // raise the acknowledgment floor so a late response from the previous
+      // account's in-flight save can never become this account's rollback
+      // target, and drop the previous account's confirmed values
+      this._confirmedSupportSeq = this._supportOpSeq;
+      this._confirmedSupportSettings = null;
+      this.setState({ supportSettings: null });
+      if (isLoggedIn && username) {
+        this._fetchSupportSettings();
+      }
+    }
+  }
+
+  componentWillUnmount() {
+    this._focusUnsubscribe?.();
+  }
+
+  // reads through the shared SDK query cache so the editor chip and this
+  // screen stay coherent; malformed 200 responses keep the controls hidden
+  _fetchSupportSettings = async () => {
+    const { queryClient, username, code } = this.props as any;
+
+    this._supportOpSeq += 1;
+    const seq = this._supportOpSeq;
+
+    try {
+      const supportSettings = await queryClient.fetchQuery(
+        getSupportSettingsQueryOptions(username, code),
+      );
+      if (seq !== this._supportOpSeq) return;
+      const nextSettings = isValidSupportSettings(supportSettings)
+        ? {
+            beneficiary_percent: supportSettings.beneficiary_percent || 0,
+            curation_percent: supportSettings.curation_percent || 0,
+          }
+        : null;
+      if (nextSettings && seq > this._confirmedSupportSeq) {
+        this._confirmedSupportSettings = nextSettings;
+        this._confirmedSupportSeq = seq;
+      }
+      this.setState({ supportSettings: nextSettings });
+    } catch {
+      if (seq !== this._supportOpSeq) return;
+      // keep controls hidden; re-entering the screen retries
+      this.setState({ supportSettings: null });
+    }
+  };
+
   // Component Functions
-  _handleDropdownSelected = async (action, actionType) => {
-    const { dispatch, selectedLanguage, intl } = this.props;
+  _handleDropdownSelected = async (action: any, actionType: any) => {
+    const { dispatch, selectedLanguage, intl } = this.props as any;
     switch (actionType) {
       case 'currency':
         this._currencyChange(action);
@@ -112,24 +267,127 @@ class SettingsContainer extends Component {
         dispatch(setColorTheme(action));
 
         break;
+      case settingsTypes.IMAGE_SERVER: {
+        const server = IMAGE_SERVERS[action];
+        if (server) {
+          dispatch(setImageServer(server));
+          dispatch(toastNotification(intl.formatMessage({ id: 'alert.successful' })));
+        }
+        break;
+      }
+
+      case settingsTypes.DM_PRIVACY: {
+        const options: MattermostDmPrivacy[] = ['all', 'followers', 'none'];
+        const nextValue = options[action] || 'all';
+        try {
+          const updated = await updateMattermostDmPrivacy(nextValue);
+          this.setState({ dmPrivacy: updated });
+          dispatch(toastNotification(intl.formatMessage({ id: 'settings.dm-privacy-updated' })));
+        } catch {
+          dispatch(toastNotification(intl.formatMessage({ id: 'settings.dm-privacy-failed' })));
+        }
+        break;
+      }
+
+      case settingsTypes.SUPPORT_BENEFICIARY_PERCENT: {
+        const percent = SUPPORT_BENEFICIARY_PERCENTS[action];
+        if (percent) {
+          this._updateSupportSettings({ beneficiary_percent: percent });
+        }
+        break;
+      }
+
+      case settingsTypes.SUPPORT_CURATION_PERCENT: {
+        const percent = SUPPORT_CURATION_PERCENTS[action];
+        if (percent) {
+          this._updateSupportSettings({ curation_percent: percent });
+        }
+        break;
+      }
 
       default:
         break;
     }
   };
 
-  _changeApi = async (action) => {
+  _updateSupportSettings = async (partial: any) => {
+    const { dispatch, intl, username, code, queryClient } = this.props as any;
+    const { supportSettings } = this.state as any;
+
+    // the update carries BOTH fields; never write from unknown state
+    // (controls are hidden until loaded, this is a safety net)
+    if (!supportSettings || !code) {
+      return;
+    }
+
+    this._supportOpSeq += 1;
+    const seq = this._supportOpSeq;
+    this._supportSaveSeq += 1;
+    const saveSeq = this._supportSaveSeq;
+
+    const prevSettings = supportSettings;
+    const nextSettings = { ...supportSettings, ...partial };
+
+    this.setState({ supportSettings: nextSettings });
+
+    const run = async () => {
+      // a newer save supersedes this one; every save carries the full
+      // payload, so skipping stale sends collapses redundant writes and
+      // guarantees the server never applies them out of order
+      if (saveSeq !== this._supportSaveSeq) return;
+      try {
+        const response = await updateSupportSettingsRequest(code, {
+          beneficiary_percent: nextSettings.beneficiary_percent,
+          curation_percent: nextSettings.curation_percent,
+        });
+        // even a stale save was accepted by the server: record it as the
+        // rollback target for later failed saves (seq-guarded)
+        if (isValidSupportSettings(response) && seq > this._confirmedSupportSeq) {
+          this._confirmedSupportSettings = {
+            beneficiary_percent: response.beneficiary_percent,
+            curation_percent: response.curation_percent,
+          };
+          this._confirmedSupportSeq = seq;
+        }
+        // an older save must not overwrite state/cache a newer save produced
+        if (seq !== this._supportOpSeq) return;
+        if (isValidSupportSettings(response)) {
+          this.setState({
+            supportSettings: {
+              beneficiary_percent: response.beneficiary_percent,
+              curation_percent: response.curation_percent,
+            },
+          });
+          applySupportSettingsUpdate(queryClient, username, response);
+        } else {
+          queryClient?.invalidateQueries({
+            queryKey: getSupportSettingsQueryOptions(username, code).queryKey,
+          });
+        }
+        dispatch(toastNotification(intl.formatMessage({ id: 'alert.successful' })));
+      } catch {
+        // a failed older save must not roll back a newer save's state
+        if (seq !== this._supportOpSeq) return;
+        // roll back to what the server last acknowledged; the snapshot taken
+        // at save start may be an earlier save's unconfirmed optimistic value
+        this.setState({ supportSettings: this._confirmedSupportSettings || prevSettings });
+        dispatch(toastNotification(intl.formatMessage({ id: 'alert.fail' })));
+      }
+    };
+
+    // strict FIFO: the request only goes out after every earlier one settled
+    // (run never rejects, its try/catch covers the whole body)
+    this._supportSaveChain = this._supportSaveChain.then(run);
+    return this._supportSaveChain;
+  };
+
+  _changeApi = async (action: any) => {
     const { dispatch, selectedApi, intl, getServersQuery } = this.props as any;
     const serverList = getServersQuery.data;
     const server = serverList[action];
     let serverResp;
     let isError = false;
     let alertMessage;
-    const client = new Client([server, 'https://api.hive.blog'], {
-      timeout: 4000,
-      failoverThreshold: 10,
-      consoleOnFailover: true,
-    });
     dispatch(setApi(''));
 
     this.setState({
@@ -137,7 +395,25 @@ class SettingsContainer extends Component {
     });
 
     try {
-      serverResp = await client.database.getDynamicGlobalProperties();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const resp = await fetch(server, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'condenser_api.get_dynamic_global_properties',
+          params: [],
+          id: 1,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      const json = await resp.json();
+      if (!json.result || json.error) {
+        throw new Error(json.error?.message || 'RPC error');
+      }
+      serverResp = json.result;
     } catch (e) {
       isError = true;
       alertMessage = 'alert.connection_fail';
@@ -150,7 +426,7 @@ class SettingsContainer extends Component {
     if (!isError) {
       const localTime = new Date(new Date().toISOString().split('.')[0]);
       const serverTime = new Date(serverResp.time);
-      const isAlive = localTime - serverTime < 15000;
+      const isAlive = (localTime as any) - (serverTime as any) < 15000;
 
       if (!isAlive) {
         alertMessage = 'settings.server_fail';
@@ -167,6 +443,8 @@ class SettingsContainer extends Component {
       await setServer(server);
       dispatch(setApi(server));
       checkClient();
+      // Sync SDK's internal dhive client with the selected server
+      ConfigManager.setHiveNodes([server, ...serverList.filter((s: any) => s !== server)]);
     }
 
     this.setState({
@@ -181,14 +459,14 @@ class SettingsContainer extends Component {
     );
   };
 
-  _currencyChange = (action) => {
+  _currencyChange = (action: any) => {
     const { dispatch } = this.props;
 
     dispatch(setCurrency(CURRENCY_VALUE[action]));
     setCurrency2DB(CURRENCY_VALUE[action]);
   };
 
-  _handleToggleChanged = (action, actionType) => {
+  _handleToggleChanged = (action: any, actionType: any) => {
     const { dispatch, isHideImages, navigation } = this.props;
 
     switch (actionType) {
@@ -199,8 +477,14 @@ class SettingsContainer extends Component {
       case 'notification.mention':
       case 'notification.favorite':
       case 'notification.bookmark':
+      case 'notification.tags':
       case 'notification.reblog':
       case 'notification.transfers':
+      case 'notification.scheduledPublished':
+      case 'notification.delegations':
+      case 'notification.payouts':
+      case 'notification.accountUpdate':
+      case 'notification.weeklyEarnings':
         this._handleNotification(action, actionType);
         break;
 
@@ -233,12 +517,22 @@ class SettingsContainer extends Component {
       case settingsTypes.SHOW_HIDE_IMGS:
         dispatch(setHidePostsThumbnails(!isHideImages));
         break;
+      case settingsTypes.SUPPORT_BENEFICIARY:
+        this._updateSupportSettings({
+          beneficiary_percent: action ? DEFAULT_SUPPORT_PERCENT : 0,
+        });
+        break;
+      case settingsTypes.SUPPORT_CURATION:
+        this._updateSupportSettings({
+          curation_percent: action ? DEFAULT_SUPPORT_PERCENT : 0,
+        });
+        break;
       default:
         break;
     }
   };
 
-  _handleNotification = async (action, actionType) => {
+  _handleNotification = async (action: any, actionType: any) => {
     const { dispatch, notificationDetails } = this.props;
     const notifyTypesConst = {
       vote: 1,
@@ -249,8 +543,14 @@ class SettingsContainer extends Component {
       transfers: 6,
       favorite: 13,
       bookmark: 15,
+      tags: 23,
+      delegations: 10,
+      payouts: 19,
+      accountUpdate: 20,
+      weeklyEarnings: 21,
+      scheduledPublished: 22,
     };
-    const notifyTypes = [];
+    const notifyTypes: any[] = [];
 
     dispatch(
       changeNotificationSettings({
@@ -269,23 +569,23 @@ class SettingsContainer extends Component {
 
       if (notificationType === actionType.replace('notification.', '')) {
         if (action) {
-          notifyTypes.push(notifyTypesConst[notificationType]);
+          notifyTypes.push((notifyTypesConst as any)[notificationType]);
         }
       } else if (notificationDetails[item]) {
-        notifyTypes.push(notifyTypesConst[notificationType]);
+        notifyTypes.push((notifyTypesConst as any)[notificationType]);
       }
     });
     notifyTypes.sort();
 
     if (actionType === 'notification') {
-      this._setPushToken(action ? notifyTypes : []);
+      this._setPushToken(action ? notifyTypes : [], action);
     } else {
-      this._setPushToken(notifyTypes);
+      this._setPushToken(notifyTypes, action);
     }
   };
 
-  _handleButtonPress = (actionType) => {
-    const { navigation, isPinCodeOpen, dispatch, intl } = this.props as any;
+  _handleButtonPress = (actionType: any) => {
+    const { navigation, isPinCodeOpen, intl } = this.props as any;
     switch (actionType) {
       case 'reset_pin':
         navigation.navigate(ROUTES.SCREENS.PINCODE, {
@@ -297,14 +597,22 @@ class SettingsContainer extends Component {
         this._handleSendFeedback();
         break;
 
+      case settingsTypes.RATE_APP:
+        openStoreListing();
+        break;
+
+      case settingsTypes.EMAIL_DIGESTS:
+        navigation.navigate(ROUTES.SCREENS.EMAIL_DIGESTS);
+        break;
+
       case settingsTypes.BACKUP_PRIVATE_KEYS:
         if (isPinCodeOpen) {
           navigation.navigate(ROUTES.SCREENS.PINCODE, {
             navigateTo: ROUTES.SCREENS.BACKUP_KEYS,
           });
         } else {
-          dispatch(
-            showActionModal({
+          SheetManager.show(SheetNames.ACTION_MODAL, {
+            payload: {
               title: intl.formatMessage({ id: 'alert.warning' }),
               body: intl.formatMessage({ id: 'settings.keys_warning' }),
               buttons: [
@@ -313,7 +621,7 @@ class SettingsContainer extends Component {
                   onPress: () => {
                     console.log('cancel pressed');
                   },
-                  type: 'destructive',
+                  type: 'destructive' as any,
                 },
                 {
                   text: intl.formatMessage({ id: 'settings.set_pin' }),
@@ -330,8 +638,8 @@ class SettingsContainer extends Component {
                   },
                 },
               ],
-            }),
-          );
+            },
+          });
         }
         break;
 
@@ -344,7 +652,7 @@ class SettingsContainer extends Component {
     }
   };
 
-  _handleOnChange = (action, type, actionType = null) => {
+  _handleOnChange = (action: any, type: any, actionType = null) => {
     switch (type) {
       case 'dropdown':
         this._handleDropdownSelected(action, actionType);
@@ -359,45 +667,71 @@ class SettingsContainer extends Component {
     }
   };
 
-  _setPushToken = async (notifyTypes) => {
-    const { isLoggedIn, otherAccounts = [] } = this.props;
+  _setPushToken = async (notifyTypes: any, enabled = true) => {
+    const { isLoggedIn, otherAccounts = [], pinCode } = this.props;
 
     if (isLoggedIn) {
-      getExistUser().then((isExistUser) => {
-        if (isExistUser) {
-          otherAccounts.forEach((item) => {
-            const { isNotificationSettingsOpen } = this.props;
+      await Promise.all(
+        otherAccounts.map(async (item: any) => {
+          try {
+            const token = await getMessaging().getToken();
 
-            getMessaging()
-              .getToken()
-              .then((token) => {
-                const data = {
-                  username: item.username,
-                  token,
-                  system: `fcm-${Platform.OS}`,
-                  allows_notify: Number(isNotificationSettingsOpen),
-                  notify_types: notifyTypes,
-                };
-                setPushToken(data);
-              });
-          });
-        }
-      });
+            const data = {
+              username: item.username,
+              token,
+              system: `fcm-${Platform.OS}`,
+              allows_notify: enabled ? 1 : 0,
+              notify_types: notifyTypes,
+            };
+
+            if (item?.local?.accessToken && !pinCode) {
+              console.warn('PIN required to decrypt access token for', data.username);
+              return;
+            }
+
+            const accessToken =
+              item?.local?.accessToken && pinCode
+                ? decryptKey(item.local.accessToken, getDigitPinCode(pinCode))
+                : undefined;
+
+            if (!accessToken) {
+              console.warn('Failed to decrypt access token for', data.username);
+              return;
+            }
+
+            await saveNotificationSetting(
+              accessToken,
+              data.username,
+              data.system,
+              data.allows_notify,
+              data.notify_types,
+              data.token,
+            );
+          } catch (err) {
+            console.warn('Failed to save notification setting for', item.username, err);
+          }
+        }),
+      );
     }
   };
 
   _handleSendFeedback = async () => {
-    const { dispatch, intl } = this.props;
+    const { dispatch, intl, currentAccount } = this.props;
     let message;
 
-    await sendEmail(
-      'bug@ecency.com',
-      'Feedback/Bug report',
-      `Write your message here!
+    const deviceName = await DeviceInfo.getDeviceName();
+    const platform = `${deviceName} - ${Platform.OS === 'ios' ? 'iOS' : 'Android'} ${
+      Platform.Version
+    }`;
+    const appVersion = `${DeviceInfo.getVersion()} (${DeviceInfo.getBuildNumber()})`;
+    const username = currentAccount?.name || 'Unknown User';
 
-      App version: ${VersionNumber.buildVersion}
-      Platform: ${Platform.OS === 'ios' ? 'IOS' : 'Android'}`,
-    )
+    const _emailBody = intl.formatMessage(
+      { id: 'settings.feedback_body' },
+      { username, appVersion, platform },
+    );
+
+    await sendEmail('bug@ecency.com', 'Feedback/Bug report', _emailBody)
       .then(() => {
         message = 'settings.feedback_success';
       })
@@ -420,7 +754,7 @@ class SettingsContainer extends Component {
     const { dispatch, intl, currentAccount } = this.props;
 
     const _onConfirm = () => {
-      deleteAccount(currentAccount.username)
+      deleteAccount(currentAccount.name, '')
         .then(() => {
           dispatch(
             toastNotification(
@@ -443,8 +777,8 @@ class SettingsContainer extends Component {
         });
     };
 
-    dispatch(
-      showActionModal({
+    SheetManager.show(SheetNames.ACTION_MODAL, {
+      payload: {
         title: intl.formatMessage({ id: 'delete.confirm_delete_title' }),
         body: intl.formatMessage({ id: 'delete.confirm_delete_body' }),
         buttons: [
@@ -459,8 +793,8 @@ class SettingsContainer extends Component {
             onPress: _onConfirm,
           },
         ],
-      }),
-    );
+      },
+    });
   };
 
   _clearUserData = async () => {
@@ -474,8 +808,13 @@ class SettingsContainer extends Component {
         setAuthStatus({ isLoggedIn: false });
         setExistUser(false);
         if (otherAccounts.length > 0) {
-          otherAccounts.map((item) => dispatch(removeOtherAccount(item.username)));
+          otherAccounts.map((item: any) => dispatch(removeOtherAccount(item.username)));
         }
+        // Drop the shared Mattermost PAT and any cached/in-flight bootstrap
+        // so a request already on the wire can't resurrect the session for
+        // the user we just wiped.
+        setChatApiToken(null);
+        clearMattermostBootstrapCache();
         dispatch(logoutDone());
         dispatch(isPinCodeOpen(false));
       })
@@ -502,7 +841,7 @@ class SettingsContainer extends Component {
     }, 500);
   };
 
-  _enableDefaultUnlockPin = (isEnabled) => {
+  _enableDefaultUnlockPin = (isEnabled: any) => {
     const { dispatch, encUnlockPin } = this.props;
 
     dispatch(isPinCodeOpen(isEnabled));
@@ -514,13 +853,13 @@ class SettingsContainer extends Component {
         return;
       }
 
-      const encryptedPin = encryptKey(Config.DEFAULT_PIN, Config.PIN_KEY);
+      const encryptedPin = encryptKey(Config.DEFAULT_PIN!, Config.PIN_KEY!);
       dispatch(setEncryptedUnlockPin(encryptedPin));
     }
   };
 
   render() {
-    const { isNotificationMenuOpen, isLoading } = this.state as any;
+    const { isNotificationMenuOpen, isLoading, dmPrivacy, supportSettings } = this.state as any;
     const { colorTheme, getServersQuery } = this.props as any;
     const serverList = getServersQuery.data;
 
@@ -532,43 +871,68 @@ class SettingsContainer extends Component {
         handleOnButtonPress={this._handleButtonPress}
         isLoading={isLoading}
         colorThemeIndex={colorTheme}
+        dmPrivacy={dmPrivacy}
+        supportSettings={supportSettings}
         {...this.props}
       />
     );
   }
 }
 
-const mapStateToProps = (state) => ({
-  isDarkTheme: state.application.isDarkTheme,
-  colorTheme: state.application.colorTheme,
-  isPinCodeOpen: state.application.isPinCodeOpen,
-  encUnlockPin: state.application.encUnlockPin,
-  isBiometricEnabled: state.application.isBiometricEnabled,
-  isDefaultFooter: state.application.isDefaultFooter,
-  isLoggedIn: state.application.isLoggedIn,
-  isNotificationSettingsOpen: state.application.isNotificationOpen,
-  nsfw: state.application.nsfw,
-  notificationDetails: state.application.notificationDetails,
-  commentNotification: state.application.notificationDetails.commentNotification,
-  followNotification: state.application.notificationDetails.followNotification,
-  mentionNotification: state.application.notificationDetails.mentionNotification,
-  favoriteNotification: state.application.notificationDetails.favoriteNotification,
-  bookmarkNotification: state.application.notificationDetails.bookmarkNotification,
-  reblogNotification: state.application.notificationDetails.reblogNotification,
-  transfersNotification: state.application.notificationDetails.transfersNotification,
-  voteNotification: state.application.notificationDetails.voteNotification,
-  selectedApi: state.application.api,
-  selectedCurrency: state.application.currency,
-  selectedLanguage: state.application.language,
-  username: state.account.currentAccount && state.account.currentAccount.name,
-  currentAccount: state.account.currentAccount,
-  otherAccounts: state.account.otherAccounts,
-  isHideImages: state.application.hidePostsThumbnails,
-});
+const mapStateToProps = (state: any) => {
+  const notificationDetails = selectNotificationDetails(state);
+  return {
+    isDarkTheme: selectIsDarkTheme(state),
+    colorTheme: selectColorTheme(state),
+    isPinCodeOpen: selectIsPinCodeOpen(state),
+    encUnlockPin: selectEncUnlockPin(state),
+    isBiometricEnabled: selectIsBiometricEnabled(state),
+    isDefaultFooter: selectIsDefaultFooter(state),
+    isLoggedIn: selectIsLoggedIn(state),
+    isNotificationSettingsOpen: selectIsNotificationOpen(state),
+    isFCMAvailable: selectIsFCMAvailable(state),
+    nsfw: selectNsfw(state),
+    notificationDetails,
+    commentNotification: notificationDetails.commentNotification,
+    followNotification: notificationDetails.followNotification,
+    mentionNotification: notificationDetails.mentionNotification,
+    favoriteNotification: notificationDetails.favoriteNotification,
+    bookmarkNotification: notificationDetails.bookmarkNotification,
+    tagsNotification: notificationDetails.tagsNotification,
+    reblogNotification: notificationDetails.reblogNotification,
+    transfersNotification: notificationDetails.transfersNotification,
+    voteNotification: notificationDetails.voteNotification,
+    scheduledPublishedNotification: notificationDetails.scheduledPublishedNotification,
+    delegationsNotification: notificationDetails.delegationsNotification,
+    payoutsNotification: notificationDetails.payoutsNotification,
+    accountUpdateNotification: notificationDetails.accountUpdateNotification,
+    weeklyEarningsNotification: notificationDetails.weeklyEarningsNotification,
+    selectedApi: selectApi(state),
+    selectedCurrency: selectCurrency(state),
+    selectedLanguage: selectLanguage(state),
+    username: selectCurrentAccount(state)?.name,
+    currentAccount: selectCurrentAccount(state),
+    pinCode: selectPin(state),
+    otherAccounts: selectOtherAccounts(state),
+    isHideImages: selectHidePostsThumbnails(state),
+    selectedImageServer: selectImageServer(state),
+  };
+};
 
-const mapHooksToProps = (props) => {
+const mapHooksToProps = (props: any) => {
   const navigation = useNavigation();
   const getServersQuery = useGetServersQuery();
-  return <SettingsContainer {...props} navigation={navigation} getServersQuery={getServersQuery} />;
+  const queryClient = useQueryClient();
+  // decrypted access token for the SDK support settings query/update
+  const { code } = useAuth();
+  return (
+    <SettingsContainer
+      {...props}
+      navigation={navigation}
+      getServersQuery={getServersQuery}
+      queryClient={queryClient}
+      code={code}
+    />
+  );
 };
 export default gestureHandlerRootHOC(connect(mapStateToProps)(injectIntl(mapHooksToProps)));

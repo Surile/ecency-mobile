@@ -1,6 +1,6 @@
 import React, { forwardRef, Ref, useImperativeHandle, useRef, useState } from 'react';
 import { useIntl } from 'react-intl';
-import { KeyboardAvoidingView, Platform, View, Text } from 'react-native';
+import { Alert, KeyboardAvoidingView, Platform, View, Text } from 'react-native';
 import ActionSheet from 'react-native-actions-sheet';
 import EStyleSheet from 'react-native-extended-stylesheet';
 import { useDispatch } from 'react-redux';
@@ -31,7 +31,7 @@ const CustomiseFiltersModal = ({ pageType }: Props, ref: Ref<CustomiseFiltersMod
   const dispatch = useDispatch();
   const intl = useIntl();
 
-  const sheetModalRef = useRef<ActionSheet>();
+  const sheetModalRef = useRef<any>(null);
 
   // redux
   const savedFilters = useAppSelector((state) => {
@@ -72,7 +72,7 @@ const CustomiseFiltersModal = ({ pageType }: Props, ref: Ref<CustomiseFiltersMod
   // save snippet based on editor pageType
   const _onApply = () => {
     if (selectedFilters.length < 3) {
-      alert(intl.formatMessage({ id: 'alert.wrong_filter_count' }));
+      Alert.alert(intl.formatMessage({ id: 'alert.wrong_filter_count' }));
       return;
     }
 
@@ -118,8 +118,8 @@ const CustomiseFiltersModal = ({ pageType }: Props, ref: Ref<CustomiseFiltersMod
   const _renderContent = (
     <KeyboardAvoidingView
       style={styles.container}
-      keyboardVerticalOffset={Platform.OS == 'ios' ? 64 : null}
-      behavior={Platform.OS === 'ios' ? 'padding' : null}
+      keyboardVerticalOffset={Platform.OS == 'ios' ? 64 : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <Text style={styles.title}>{intl.formatMessage({ id: 'selection_list.title_filters' })}</Text>
 
@@ -140,7 +140,7 @@ const CustomiseFiltersModal = ({ pageType }: Props, ref: Ref<CustomiseFiltersMod
     <ActionSheet
       ref={sheetModalRef}
       containerStyle={styles.sheetContent}
-      indicatorColor={EStyleSheet.value('$primaryWhiteLightBackground')}
+      {...({ indicatorColor: EStyleSheet.value('$primaryWhiteLightBackground') } as any)}
       onClose={_onClose}
     >
       {_renderContent}

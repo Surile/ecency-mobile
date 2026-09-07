@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { TouchableOpacity, Text } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { TouchableOpacity, Text, Keyboard, Platform } from 'react-native';
 import Animated, { SlideInDown, SlideOutDown } from 'react-native-reanimated';
 
 // Styles
@@ -21,6 +21,8 @@ const ToastNotification = ({
   onPress,
   onHide,
 }: ToastNotificationProps) => {
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
   // Component Life Cycles
   useEffect(() => {
     if (duration) {
@@ -31,6 +33,21 @@ const ToastNotification = ({
         clearTimeout(closeTimer);
       };
     }
+  }, []);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      setKeyboardHeight(e.endCoordinates.height);
+    });
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setKeyboardHeight(0);
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
   }, []);
 
   // Component Functions
@@ -48,9 +65,10 @@ const ToastNotification = ({
         style={{
           ...styles.container,
           ...style,
+          ...(keyboardHeight > 0 && { bottom: keyboardHeight + 10 }),
         }}
-        entering={SlideInDown.duration(750)}
-        exiting={SlideOutDown.duration(500)}
+        entering={Platform.OS === 'ios' ? SlideInDown.duration(750) : undefined}
+        exiting={Platform.OS === 'ios' ? SlideOutDown.duration(500) : undefined}
       >
         <Text style={[styles.text, textStyle]} numberOfLines={2}>
           {text}

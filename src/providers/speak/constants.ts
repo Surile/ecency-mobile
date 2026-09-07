@@ -1,19 +1,8 @@
-export const BASE_URL_SPEAK_STUDIO = 'https://studio.3speak.tv';
+/** Ecency backend base — used to reach the 3Speak proxy routes. */
+export { default as Config } from 'react-native-config';
 
-export const BASE_URL_SPEAK_UPLOAD = 'https://uploads.3speak.tv/files';
+/** Default embed endpoint (fallback if proxy doesn't return upload_url). */
+export const EMBED_ENDPOINT = 'https://embed.3speak.tv';
 
-export const BASE_URL_SPEAK_WATCH = 'https://3speak.tv/watch';
-
-export const PATH_MOBILE = 'mobile';
-export const PATH_LOGIN = 'login';
-export const PATH_API = 'api';
-
-export const DEFAULT_SPEAK_BENEFICIARIES = [
-  {
-    account: 'spk.beneficiary',
-    src: 'ENCODER_PAY',
-    weight: 1000,
-  },
-];
-
-export const BENEFICIARY_SRC_ENCODER = 'ENCODER_PAY';
+// The 3Speak beneficiary account and weight now live in @ecency/sdk, so the web app and
+// this one cannot drift on a payout value.

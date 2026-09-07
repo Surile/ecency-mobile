@@ -1,14 +1,7 @@
 import { Component } from 'react';
 import DeviceInfo from 'react-native-device-info';
 
-import {
-  Platform,
-  Alert,
-  Linking,
-  AppState,
-  NativeEventSubscription,
-  EventSubscription,
-} from 'react-native';
+import { Platform, Alert, Linking, AppState, NativeEventSubscription } from 'react-native';
 import NetInfo from '@react-native-community/netinfo';
 import Config from 'react-native-config';
 import changeNavigationBarColor from 'react-native-navigation-bar-color';
@@ -20,8 +13,20 @@ import VersionNumber from 'react-native-version-number';
 import ReceiveSharingIntent from 'react-native-receive-sharing-intent';
 
 // Constants
+import { SheetManager } from 'react-native-actions-sheet';
+import * as Sentry from '@sentry/react-native';
+import {
+  getMutedUsersQueryOptions,
+  getNotificationsUnreadCountQueryOptions,
+  saveNotificationSetting,
+} from '@ecency/sdk';
+
 import AUTH_TYPE from '../../../constants/authType';
 import ROUTES from '../../../constants/routeNames';
+import {
+  FCM_FOREGROUND_NOTIFICATION_TYPES,
+  WS_NOTIFICATION_TYPES,
+} from '../../../constants/notificationTypes';
 
 // Services
 import {
@@ -34,17 +39,23 @@ import {
   setExistUser,
   getLastUpdateCheck,
   setLastUpdateCheck,
-} from '../../../realm/realm';
-import { getUser, getDigitPinCode, getMutes } from '../../../providers/hive/dhive';
+} from '../../../storage/storage';
+import { getDigitPinCode, getUser } from '../../../providers/hive/hive';
+import { getQueryClient } from '../../../providers/queries';
 import { getPointsSummary } from '../../../providers/ecency/ePoint';
 import {
   migrateToMasterKeyWithAccessToken,
   refreshSCToken,
   switchAccount,
 } from '../../../providers/hive/auth';
-import { setPushToken, getUnreadNotificationCount } from '../../../providers/ecency/ecency';
 import { fetchLatestAppVersion } from '../../../providers/github/github';
 import RootNavigation from '../../../navigation/rootNavigation';
+import {
+  bootstrapMattermostSession,
+  calculateGlobalUnreadTotal,
+  clearMattermostBootstrapCache,
+} from '../../../providers/chat/mattermost';
+import { setChatApiToken, getChatApiTokenOwner } from '../../../config/chatApi';
 
 // Actions
 import {
@@ -61,14 +72,15 @@ import {
   isRenderRequired,
   isPinCodeOpen,
   setEncryptedUnlockPin,
+  setFCMAvailable,
 } from '../../../redux/actions/applicationActions';
 import {
   setAvatarCacheStamp,
-  showActionModal,
   toastNotification,
   updateActiveBottomTab,
   logout,
   logoutDone,
+  updateUnreadChatCount,
 } from '../../../redux/actions/uiAction';
 import { setFeedPosts, setInitPosts } from '../../../redux/actions/postsAction';
 import { fetchCoinQuotes } from '../../../redux/actions/walletActions';
@@ -83,17 +95,47 @@ import MigrationHelpers, {
   repairOtherAccountsData,
   repairUserAccountData,
 } from '../../../utils/migrationHelpers';
-import { deepLinkParser } from '../../../utils/deepLinkParser';
-import bugsnapInstance from '../../../config/bugsnag';
+import { autoDetectLocale } from '../../../utils/autoLocale';
+import { SheetNames } from '../../../navigation/sheets';
+import {
+  selectCurrentAccount,
+  selectIsLoggedIn,
+  selectIsDarkTheme,
+  selectLanguage,
+  selectPin,
+  selectIsPinCodeOpen,
+  selectOtherAccounts,
+  selectIsConnected,
+  selectPrevLoggedInUsers,
+  selectNotificationDetails,
+  selectEncUnlockPin,
+  selectIsNotificationOpen,
+  selectApi,
+  selectSettingsMigratedV2,
+  selectIsGlobalRenderRequired,
+  selectLastUpdateCheck,
+  selectCurrentAccountUnreadActivityCount,
+} from '../../../redux/selectors';
 
 let firebaseOnMessageListener: any = null;
 let appStateSub: NativeEventSubscription | null = null;
-let linkingEventSub: EventSubscription | null = null;
 
-class ApplicationContainer extends Component {
+class ApplicationContainer extends Component<any, any> {
+  netListener: any;
+
   _pinCodeTimer: any = null;
 
-  constructor(props) {
+  _notificationWs: WebSocket | null = null;
+
+  _notificationUsername: string | null = null;
+
+  _wsReconnectTimer: any = null;
+
+  _wsReconnectAttempts: number = 0;
+
+  _fcmAvailable: boolean | null = null; // Cache FCM availability check
+
+  constructor(props: any) {
     super(props);
     this.state = {
       isRenderRequire: true,
@@ -103,19 +145,20 @@ class ApplicationContainer extends Component {
     };
   }
 
-  componentDidMount = () => {
+  componentDidMount = async () => {
     const { dispatch } = this.props;
     this._setNetworkListener();
 
-    linkingEventSub = Linking.addEventListener('url', this._handleOpenURL);
-    // TOOD: read initial URL
-    Linking.getInitialURL().then((url) => {
-      this._handleDeepLink(url);
-    });
-
     appStateSub = AppState.addEventListener('change', this._handleAppStateChange);
 
-    this._createPushListener();
+    // Only create FCM listener if FCM is available
+    const fcmAvailable = await this._checkFCMAvailability();
+    if (fcmAvailable) {
+      this._createPushListener();
+      console.log('Using FCM for foreground notifications');
+    } else {
+      console.log('FCM not available - will use WebSocket fallback when user logs in');
+    }
 
     // set avatar cache stamp to invalidate previous session avatars
     dispatch(setAvatarCacheStamp(new Date().getTime()));
@@ -124,22 +167,36 @@ class ApplicationContainer extends Component {
     this._fetchApp();
 
     ReceiveSharingIntent.getReceivedFiles(
-      (files) => {
-        RootNavigation.navigate({
-          name: ROUTES.SCREENS.EDITOR,
-          params: { hasSharedIntent: true, files },
-        });
-        // files returns as JSON Array example
-        // [{ filePath: null, text: null, weblink: null, mimeType: null, contentUri: null, fileName: null, extension: null }]
-        ReceiveSharingIntent.clearReceivedFiles(); // clear Intents
+      async (files: any) => {
+        try {
+          const target = await SheetManager.show(SheetNames.SHARE_INTENT, {
+            payload: { files },
+          });
+          // Default to blog editor when user dismisses the sheet (swipe / backdrop),
+          // so an accidental dismiss doesn't silently lose the shared content.
+          const choice = target || 'blog';
+          if (choice === 'blog') {
+            RootNavigation.navigate({
+              name: ROUTES.SCREENS.EDITOR,
+              params: { hasSharedIntent: true, files },
+            });
+          } else if (choice === 'wave') {
+            SheetManager.show(SheetNames.QUICK_POST, {
+              payload: { mode: 'wave', files },
+            });
+          }
+        } catch (e) {
+          console.log('share intent sheet error :>> ', e);
+        }
+        ReceiveSharingIntent.clearReceivedFiles();
       },
-      (error) => {
+      (error: any) => {
         console.log('error :>> ', error);
       },
     );
   };
 
-  componentDidUpdate(prevProps) {
+  componentDidUpdate(prevProps: any) {
     const { isGlobalRenderRequired, dispatch } = this.props;
 
     if (isGlobalRenderRequired !== prevProps.isGlobalRenderRequired && isGlobalRenderRequired) {
@@ -160,9 +217,6 @@ class ApplicationContainer extends Component {
     const { isPinCodeOpen: _isPinCodeOpen } = this.props;
 
     // TOOD: listen for back press and cancel all pending api requests;
-    if (linkingEventSub) {
-      linkingEventSub.remove();
-    }
 
     if (appStateSub) {
       appStateSub.remove();
@@ -175,6 +229,8 @@ class ApplicationContainer extends Component {
     if (firebaseOnMessageListener) {
       firebaseOnMessageListener();
     }
+
+    this._disconnectNotificationServer();
 
     this.netListener();
   }
@@ -189,84 +245,63 @@ class ApplicationContainer extends Component {
     });
   };
 
-  _handleOpenURL = (event) => {
-    this._handleDeepLink(event.url);
-  };
-
-  _handleDeepLink = async (url: string | null) => {
-    const { currentAccount } = this.props;
-
-    if (!url) {
-      return;
-    }
-
-    try {
-      const deepLinkData = await deepLinkParser(url, currentAccount);
-      const { name, params, key } = deepLinkData || {};
-
-      if (name && key) {
-        RootNavigation.navigate({
-          name,
-          params,
-          key,
-        });
-      }
-    } catch (err) {
-      this._handleAlert(err.message);
-    }
-  };
-
   _compareAndPromptForUpdate = async () => {
-    const recheckInterval = 48 * 3600 * 1000; // 2 days
-    const { dispatch, intl } = this.props;
+    try {
+      const recheckInterval = 48 * 3600 * 1000; // 2 days
+      const { intl } = this.props;
 
-    const lastUpdateCheck = await getLastUpdateCheck();
+      const lastUpdateCheck = await getLastUpdateCheck();
 
-    if (lastUpdateCheck) {
-      const timeDiff = new Date().getTime() - lastUpdateCheck;
-      if (timeDiff < recheckInterval) {
-        return;
+      if (lastUpdateCheck) {
+        const timeDiff = new Date().getTime() - lastUpdateCheck;
+        if (timeDiff < recheckInterval) {
+          return;
+        }
       }
-    }
 
-    const remoteVersion = await fetchLatestAppVersion();
+      const remoteVersion = await fetchLatestAppVersion();
 
-    if (parseVersionNumber(remoteVersion) > parseVersionNumber(VersionNumber.appVersion)) {
-      dispatch(
-        showActionModal({
-          title: intl.formatMessage(
-            { id: 'alert.update_available_title' },
-            { version: remoteVersion },
-          ),
-          body: intl.formatMessage({ id: 'alert.update_available_body' }),
-          buttons: [
-            {
-              text: intl.formatMessage({ id: 'alert.remind_later' }),
-              onPress: () => {
-                setLastUpdateCheck(new Date().getTime());
+      if (parseVersionNumber(remoteVersion) > parseVersionNumber(VersionNumber.appVersion)) {
+        const action = await SheetManager.show(SheetNames.ACTION_MODAL, {
+          payload: {
+            title: intl.formatMessage(
+              { id: 'alert.update_available_title' },
+              { version: remoteVersion },
+            ),
+            body: intl.formatMessage({ id: 'alert.update_available_body' }),
+            buttons: [
+              {
+                text: intl.formatMessage({ id: 'alert.remind_later' }),
+                returnValue: 'later',
               },
-            },
-            {
-              text: intl.formatMessage({ id: 'alert.update' }),
-              onPress: () => {
-                DeviceInfo.getInstallerPackageName().then((installerPackageName) => {
-                  let _url = 'https://github.com/ecency/ecency-mobile/releases';
-                  switch (installerPackageName) {
-                    case 'com.android.vending':
-                      _url = 'market://details?id=app.esteem.mobile.android';
-                      break;
-                    case 'AppStore':
-                      _url = 'itms-apps://itunes.apple.com/us/app/apple-store/id1451896376?mt=8';
-                      break;
-                  }
-                  Linking.openURL(_url);
-                });
+              {
+                text: intl.formatMessage({ id: 'alert.update' }),
+                returnValue: 'update',
               },
-            },
-          ],
-          headerImage: require('../../../assets/phone-holding.png'),
-        }),
-      );
+            ],
+            headerImage: require('../../../assets/phone-holding.png'),
+          },
+        });
+
+        if (action === 'later') {
+          setLastUpdateCheck(new Date().getTime());
+        } else if (action === 'update') {
+          DeviceInfo.getInstallerPackageName().then((installerPackageName) => {
+            let _url = 'https://github.com/ecency/vision-mobile/releases';
+            switch (installerPackageName) {
+              case 'com.android.vending':
+                _url = 'market://details?id=app.esteem.mobile.android';
+                break;
+              case 'AppStore':
+                _url = 'itms-apps://itunes.apple.com/us/app/apple-store/id1451896376?mt=8';
+                break;
+            }
+            Linking.openURL(_url);
+          });
+        }
+      }
+    } catch (error) {
+      Sentry.captureException(error);
     }
   };
 
@@ -283,13 +318,18 @@ class ApplicationContainer extends Component {
     );
   };
 
-  _handleAppStateChange = (nextAppState) => {
-    const { isPinCodeOpen: _isPinCodeOpen } = this.props;
+  _handleAppStateChange = (nextAppState: any) => {
+    const { isPinCodeOpen: _isPinCodeOpen, currentAccount } = this.props;
     const { appState } = this.state;
 
     if (appState.match(/inactive|background/) && nextAppState === 'active') {
       this._refreshGlobalProps();
       this._refreshUnreadActivityCount();
+      this._refreshUnreadChats();
+      // Refresh account data to get latest profile updates from blockchain
+      if (currentAccount?.local) {
+        this._fetchUserDataFromDsteem(currentAccount.local);
+      }
       if (_isPinCodeOpen && this._pinCodeTimer) {
         clearTimeout(this._pinCodeTimer);
       }
@@ -305,12 +345,18 @@ class ApplicationContainer extends Component {
   };
 
   _fetchApp = async () => {
-    const { dispatch, settingsMigratedV2 } = this.props;
+    const { dispatch, settingsMigratedV2, selectedLanguage } = this.props;
 
     await MigrationHelpers.migrateSettings(dispatch, settingsMigratedV2);
 
+    // First-launch only: set the app language from the device locale when the
+    // user hasn't picked one yet (still on en-US default). Never overrides a
+    // manual choice and only ever sets a registered locale.
+    await autoDetectLocale(dispatch, selectedLanguage);
+
     this._refreshGlobalProps();
     await this._getUserDataFromRealm();
+    await this._refreshUnreadChats();
     this._compareAndPromptForUpdate();
     this._registerDeviceForNotifications();
     dispatch(purgeExpiredCache());
@@ -327,7 +373,7 @@ class ApplicationContainer extends Component {
     }
   };
 
-  _showNotificationToast = (remoteMessage) => {
+  _showNotificationToast = (remoteMessage: any) => {
     const { dispatch } = this.props;
 
     if (remoteMessage && remoteMessage.notification) {
@@ -342,13 +388,22 @@ class ApplicationContainer extends Component {
     firebaseOnMessageListener = getMessaging().onMessage((remoteMessage) => {
       console.log('Notification Received: foreground', remoteMessage);
 
+      const messageType = remoteMessage?.data?.type;
+      if ((FCM_FOREGROUND_NOTIFICATION_TYPES as readonly string[]).includes(messageType as any)) {
+        // FCM and the enotify websocket can both deliver the same event, so a
+        // local +1 double-counted (e.g. daily-spin POINT transfers showed 2).
+        // Re-fetch the authoritative unread count instead.
+        this._refreshUnreadActivityCount();
+      }
+
+      // Show foreground notification banner
       this.setState({
         foregroundNotificationData: remoteMessage,
       });
     });
   };
 
-  _handleConntectionChange = (status) => {
+  _handleConntectionChange = (status: any) => {
     const { dispatch, isConnected } = this.props;
 
     if (isConnected !== status) {
@@ -363,43 +418,100 @@ class ApplicationContainer extends Component {
   };
 
   _refreshUnreadActivityCount = async () => {
-    const { dispatch, isLoggedIn } = this.props;
-    if (isLoggedIn) {
-      const unreadActivityCount = await getUnreadNotificationCount();
-      dispatch(updateUnreadActivityCount(unreadActivityCount));
+    const { dispatch, isLoggedIn, currentAccount, pinCode } = this.props;
+    if (isLoggedIn && currentAccount) {
+      const username = currentAccount.name;
+      const accessToken =
+        (currentAccount?.local?.accessToken
+          ? decryptKey(currentAccount.local.accessToken, getDigitPinCode(pinCode))
+          : '') ?? '';
+      try {
+        const queryClient = getQueryClient();
+        const unreadActivityCount = await queryClient.fetchQuery(
+          getNotificationsUnreadCountQueryOptions(username, accessToken),
+        );
+        dispatch(updateUnreadActivityCount(unreadActivityCount));
+      } catch (error) {
+        // Keep the last-known count: this runs on every incoming notification,
+        // and intermittent mobile connectivity must not wipe the badge to 0.
+        console.warn('Failed to refresh unread activity count', error);
+      }
     }
   };
 
-  _checkHiveAuthExpiry = (authData: any) => {
-    const { intl, dispatch } = this.props;
+  _refreshUnreadChats = async () => {
+    const { dispatch, isLoggedIn, isConnected, currentAccount, pinCode } = this.props;
+    const username = currentAccount?.name;
 
-    if (authData?.username) {
+    if (!isLoggedIn || !username) {
+      setChatApiToken(null);
+      clearMattermostBootstrapCache();
+      dispatch(updateUnreadChatCount(0));
+      return;
+    }
+
+    if (isConnected === false) {
+      return;
+    }
+
+    try {
+      await bootstrapMattermostSession(currentAccount, pinCode);
+
+      // Guard: after bootstrap completes, verify the token still belongs
+      // to this user. If another account's bootstrap ran concurrently and
+      // overwrote the token, skip the unread fetch to prevent contamination.
+      if (getChatApiTokenOwner() !== username) {
+        return;
+      }
+
+      const unreadTotal = await calculateGlobalUnreadTotal();
+      dispatch(updateUnreadChatCount(unreadTotal));
+    } catch (error) {
+      dispatch(updateUnreadChatCount(0));
+    }
+  };
+
+  _checkHiveAuthExpiry = async (authData: any) => {
+    const { intl } = this.props;
+
+    // Only check expiry for session-based authentication (HiveAuth/Keychain or HiveSigner)
+    // Skip for private key accounts (masterKey, postingKey, etc.)
+    const isSessionBasedAuth =
+      authData?.authType === AUTH_TYPE.HIVE_AUTH || authData?.authType === AUTH_TYPE.STEEM_CONNECT;
+
+    if (
+      authData?.username &&
+      isSessionBasedAuth &&
+      authData.hiveAuthExpiry &&
+      typeof authData.hiveAuthExpiry === 'number' &&
+      authData.hiveAuthExpiry > 0
+    ) {
       const curTime = new Date().getTime();
       if (curTime > authData.hiveAuthExpiry) {
-        dispatch(
-          showActionModal({
+        const action = await SheetManager.show(SheetNames.ACTION_MODAL, {
+          payload: {
             title: intl.formatMessage({ id: 'alert.warning' }),
             body: intl.formatMessage({ id: 'alert.auth_expired' }),
             buttons: [
               {
                 text: intl.formatMessage({ id: 'alert.cancel' }),
                 style: 'destructive',
-                onPress: () => {
-                  console.log('cancel pressed');
-                },
+                returnValue: 'cancel',
               },
               {
                 text: intl.formatMessage({ id: 'alert.verify' }),
-                onPress: () => {
-                  RootNavigation.navigate({
-                    name: ROUTES.SCREENS.LOGIN,
-                    params: { username: authData.username },
-                  });
-                },
+                returnValue: 'verify',
               },
             ],
-          }),
-        );
+          },
+        });
+
+        if (action === 'verify') {
+          RootNavigation.navigate({
+            name: ROUTES.SCREENS.LOGIN,
+            params: { username: authData.username },
+          });
+        }
       }
     }
   };
@@ -412,7 +524,7 @@ class ApplicationContainer extends Component {
       otherAccounts,
       currentAccount,
     } = this.props;
-    let realmData = [];
+    let realmData: any[] = [];
 
     if (currentAccount?.name) {
       dispatch(login(true));
@@ -423,7 +535,7 @@ class ApplicationContainer extends Component {
 
       if (userData && userData.length > 0) {
         realmData = userData;
-        userData.forEach((accountData, index) => {
+        userData.forEach((accountData: any, index: any) => {
           if (
             !accountData ||
             (!accountData.accessToken &&
@@ -439,7 +551,7 @@ class ApplicationContainer extends Component {
         });
       }
 
-      let [authData]: any = realmData.filter((data) => data.username === username);
+      let [authData]: any = realmData.filter((data: any) => data.username === username);
 
       // reapir otherAccouts data is needed
       // this repair must be done because code above makes sure every entry is realmData is a valid one
@@ -455,8 +567,11 @@ class ApplicationContainer extends Component {
         }
       }
 
-      // check session expiry in case of HIVE_AUTH
-      if (authData.authType === AUTH_TYPE.HIVE_AUTH) {
+      // check session expiry for session-based auth (HiveAuth or HiveSigner)
+      if (
+        authData.authType === AUTH_TYPE.HIVE_AUTH ||
+        authData.authType === AUTH_TYPE.STEEM_CONNECT
+      ) {
         this._checkHiveAuthExpiry(authData);
       }
 
@@ -464,7 +579,7 @@ class ApplicationContainer extends Component {
       if (_isPinCodeOpen) {
         RootNavigation.navigate({ name: ROUTES.SCREENS.PINCODE });
       } else if (!_isPinCodeOpen) {
-        const encryptedPin = encryptKey(Config.DEFAULT_PIN, Config.PIN_KEY);
+        const encryptedPin = encryptKey(Config.DEFAULT_PIN!, Config.PIN_KEY!);
         dispatch(savePinCode(encryptedPin));
       }
 
@@ -476,7 +591,7 @@ class ApplicationContainer extends Component {
     }
   };
 
-  _refreshAccessToken = async (currentAccount) => {
+  _refreshAccessToken = async (currentAccount: any) => {
     const { pinCode, isPinCodeOpen, encUnlockPin, dispatch, intl } = this.props;
 
     if (isPinCodeOpen && !encUnlockPin) {
@@ -500,7 +615,7 @@ class ApplicationContainer extends Component {
         intl.formatMessage({
           id: 'alert.fail',
         }),
-        error.message,
+        (error as any).message,
         [
           {
             text: intl.formatMessage({ id: 'side_menu.logout' }),
@@ -516,7 +631,7 @@ class ApplicationContainer extends Component {
     }
   };
 
-  _fetchUserDataFromDsteem = async (realmObject) => {
+  _fetchUserDataFromDsteem = async (realmObject: any) => {
     const { dispatch, intl, pinCode, isPinCodeOpen, encUnlockPin } = this.props;
 
     try {
@@ -539,8 +654,20 @@ class ApplicationContainer extends Component {
       }
 
       try {
-        accountData.unread_activity_count = await getUnreadNotificationCount();
-        accountData.mutes = await getMutes(realmObject.username);
+        const queryClient = getQueryClient();
+        const accessToken =
+          (accountData?.local?.accessToken
+            ? decryptKey(accountData.local.accessToken, getDigitPinCode(pinCode))
+            : '') ?? '';
+        accountData.unread_activity_count = await queryClient.fetchQuery(
+          getNotificationsUnreadCountQueryOptions(realmObject.username, accessToken),
+        );
+
+        // Fetch muted users using SDK query
+        accountData.mutes = await queryClient.fetchQuery(
+          getMutedUsersQueryOptions(realmObject.username),
+        );
+
         accountData.pointsSummary = await getPointsSummary(realmObject.username);
       } catch (err) {
         console.warn(
@@ -550,13 +677,42 @@ class ApplicationContainer extends Component {
       }
       dispatch(updateCurrentAccount(accountData));
       dispatch(fetchSubscribedCommunities(realmObject.username));
-      this._connectNotificationServer(accountData.name);
+
+      // Connect to notification server based on FCM availability
+      // If FCM is available, it will handle notifications
+      // If not, use WebSocket as fallback
+      const fcmAvailable = await this._checkFCMAvailability();
+      if (!fcmAvailable) {
+        console.log('Connecting to WebSocket notification server (FCM not available)');
+        this._connectNotificationServer(accountData.name);
+      } else {
+        console.log('Using FCM for notifications (WebSocket not needed)');
+        // Ensure any previous websocket is disconnected
+        this._disconnectNotificationServer();
+      }
+
       // TODO: better update device push token here after access token refresh
     } catch (err) {
+      // A cancelled in-flight startup query — e.g. the account-full fetch in
+      // getUser() superseded/aborted during bootstrap — rejects with
+      // CancelledError/AbortError. That is benign (the data refetches), so don't
+      // surface the blocking "change server and restart" alert for it. Reading
+      // `err.message` defensively also avoids a secondary throw when it's unset.
+      const _name = (err && (err as any).name) || '';
+      const _msg = (err && (err as any).message) || String(err) || '';
+      if (
+        _name === 'CancelledError' ||
+        _name === 'AbortError' ||
+        _msg.includes('CancelledError') ||
+        _msg.includes('aborted')
+      ) {
+        console.warn('Startup user-data fetch cancelled (benign), skipping alert', err);
+        return;
+      }
       Alert.alert(
         `${intl.formatMessage({
           id: 'alert.fetch_error',
-        })} \n${err.message.substr(0, 20)}`,
+        })} \n${_msg.substr(0, 20)}`,
       );
     }
   };
@@ -569,64 +725,309 @@ class ApplicationContainer extends Component {
     const isEnabled = settings ? !!settings.notification : isNotificationsEnabled;
     settings = settings || notificationDetails;
 
-    const _enabledNotificationForAccount = (account) => {
+    const _enabledNotificationForAccount = (account: any) => {
       const encAccessToken = account?.local?.accessToken;
-      // decrypt access token
-      let accessToken = null;
-      if (encAccessToken) {
-        // NOTE: default pin decryption works also for custom pin as other account
-        // keys are not yet being affected by changed pin, which I think we should dig more
-        accessToken = decryptKey(account.name, Config.DEFAULT_PIN);
-      }
-
-      this._enableNotification(account.name, isEnabled, settings, accessToken);
+      // otherAccounts entries are keyed by username; name can be undefined on some
+      // (e.g. HiveSigner) entries, so fall back to username.
+      this._enableNotification(
+        account.name || account.username,
+        isEnabled,
+        settings,
+        encAccessToken,
+      );
     };
 
     // updateing fcm token with settings;
-    otherAccounts.forEach((account) => {
+    otherAccounts.forEach((account: any) => {
       // since there can be more than one accounts, process access tokens separate
       if (account?.local?.accessToken) {
         _enabledNotificationForAccount(account);
-      } else {
-        console.warn('access token not present, reporting to bugsnag');
-        bugsnapInstance.notify(
-          new Error(
-            `Reporting missing access token in other accounts section: account:${
-              account.name
-            } with local data ${JSON.stringify(account?.local)}`,
-          ),
-        );
+        return;
+      }
 
-        // fallback to current account access token to register atleast logged in account
-        if (currentAccount.name === account.name) {
-          _enabledNotificationForAccount(currentAccount);
-        }
+      // No stored access token on this other-account entry. This is common and benign
+      // (HiveSigner accounts, or entries keyed only by username), so do NOT report it to
+      // Sentry - it previously fired an error on every launch (ECENCY-MOBILE-1QY).
+      const acctName = account?.name || account?.username;
+      if (acctName && currentAccount?.name === acctName) {
+        // fallback to current account access token to register at least the logged-in account
+        _enabledNotificationForAccount(currentAccount);
       }
     });
   };
 
-  _connectNotificationServer = (username) => {
-    /* eslint no-undef: "warn" */
-    const ws = new WebSocket(`${Config.ACTIVITY_WEBSOCKET_URL}?user=${username}`);
+  /**
+   * Check if FCM (Firebase Cloud Messaging) is available on this device
+   * Returns cached result if already checked
+   *
+   * FCM requires:
+   * - iOS: APNS (Apple Push Notification Service) - not available on simulators
+   * - Android: Google Play Services - not available on custom ROMs, Huawei devices, emulators without Google APIs
+   */
+  _checkFCMAvailability = async (): Promise<boolean> => {
+    const { dispatch } = this.props;
 
-    ws.onmessage = () => {
-      const { activeBottomTab, unreadActivityCount, dispatch } = this.props;
+    // Return cached result if already checked
+    if (this._fcmAvailable !== null) {
+      return this._fcmAvailable;
+    }
 
-      dispatch(updateUnreadActivityCount(unreadActivityCount + 1));
-
-      // Workaround
-      if (activeBottomTab === ROUTES.TABBAR.NOTIFICATION) {
-        dispatch(updateActiveBottomTab(''));
-        dispatch(updateActiveBottomTab(ROUTES.TABBAR.NOTIFICATION));
+    try {
+      // iOS Simulator check - APNS not available
+      const isEmulator = await DeviceInfo.isEmulator();
+      if (Platform.OS === 'ios' && isEmulator) {
+        console.log('FCM not available: iOS Simulator (no APNS)');
+        this._fcmAvailable = false;
+        dispatch(setFCMAvailable(false));
+        return false;
       }
-    };
+
+      // Check permission without prompting
+      const authStatus = await getMessaging().hasPermission();
+      const permissionGranted = authStatus === 1 || authStatus === 2; // authorized or provisional
+
+      if (!permissionGranted) {
+        console.log('FCM not available: User denied notification permission');
+        this._fcmAvailable = false;
+        dispatch(setFCMAvailable(false));
+        return false;
+      }
+
+      // Try to get FCM token - this will fail if FCM isn't available
+      const token = await getMessaging().getToken();
+
+      if (token) {
+        console.log('FCM is available - token obtained');
+        this._fcmAvailable = true;
+        dispatch(setFCMAvailable(true));
+        return true;
+      } else {
+        console.log('FCM not available: No token returned');
+        this._fcmAvailable = false;
+        dispatch(setFCMAvailable(false));
+        return false;
+      }
+    } catch (error) {
+      const errorMessage = (error as any).message || '';
+
+      // Expected errors when FCM is not available
+      if (
+        errorMessage.includes('MISSING_INSTANCEID_SERVICE') ||
+        errorMessage.includes('SERVICE_NOT_AVAILABLE') ||
+        errorMessage.includes('AUTHENTICATION_FAILED') ||
+        errorMessage.includes('APNS')
+      ) {
+        console.log('FCM not available:', errorMessage);
+        this._fcmAvailable = false;
+        dispatch(setFCMAvailable(false));
+        return false;
+      }
+
+      // Unexpected error - assume FCM not available to be safe
+      console.warn('FCM availability check failed:', error);
+      this._fcmAvailable = false;
+      dispatch(setFCMAvailable(false));
+      return false;
+    }
   };
 
-  _repairUserAccountData = async (username) => {
+  _disconnectNotificationServer = () => {
+    if (this._notificationWs) {
+      console.log('Disconnecting notification websocket');
+      this._notificationWs.close();
+      this._notificationWs = null;
+    }
+    if (this._wsReconnectTimer) {
+      clearTimeout(this._wsReconnectTimer);
+      this._wsReconnectTimer = null;
+    }
+    this._wsReconnectAttempts = 0;
+  };
+
+  _connectNotificationServer = (username: any) => {
+    // Clean up existing connection first
+    this._disconnectNotificationServer();
+
+    if (!username || !Config.ACTIVITY_WEBSOCKET_URL) {
+      console.log('Skipping websocket - missing username or URL');
+      return;
+    }
+
+    try {
+      const safeUsername = encodeURIComponent(username);
+      this._notificationUsername = username;
+      console.log('Connecting notification websocket for user:', username);
+      const ws = new WebSocket(`${Config.ACTIVITY_WEBSOCKET_URL}?user=${safeUsername}`);
+      this._notificationWs = ws;
+
+      ws.onopen = () => {
+        console.log('Notification websocket connected');
+        this._wsReconnectAttempts = 0;
+      };
+
+      ws.onmessage = (event) => {
+        const { activeBottomTab, dispatch } = this.props;
+
+        console.log('Websocket notification received:', event.data);
+
+        // Try to parse notification data from enotify-py websocket
+        // Format: { event: "notify", type: "mention"|"reply", source: "username", target: "username", extra: {...}, timestamp: "..." }
+        let wsData = null;
+        try {
+          if (event.data) {
+            wsData = JSON.parse(event.data);
+          }
+        } catch (err) {
+          console.log('Websocket message is not JSON, treating as simple ping');
+        }
+
+        // Convert enotify-py websocket format to FCM format for ForegroundNotification component
+        if (
+          wsData &&
+          wsData.event === 'notify' &&
+          (WS_NOTIFICATION_TYPES as readonly string[]).includes(wsData.type)
+        ) {
+          // Re-fetch the authoritative unread count rather than a local +1:
+          // FCM may deliver the same event, and a local increment in both
+          // paths double-counted (daily-spin POINT transfers showed 2 not 1).
+          this._refreshUnreadActivityCount();
+          const { type, source, target, extra } = wsData;
+
+          // Title/body per type. A ternary chain here previously ended in a
+          // delegation fallback, so any unhandled type announced itself as a
+          // delegation — every type in the allowlist above needs a case.
+          let notifTitle = '';
+          let notifBody = '';
+          switch (type) {
+            case 'mention':
+              notifTitle = `@${source} mentioned @${target}`;
+              break;
+            case 'reply':
+              notifTitle = `@${source} replied to @${target}`;
+              notifBody = extra?.body ? extra.body.substring(0, 100) : '';
+              break;
+            case 'transfer':
+              notifTitle = `@${source} transferred to @${target}`;
+              notifBody = extra?.amount || '';
+              break;
+            case 'delegations':
+              notifTitle = `@${source} delegated to @${target}`;
+              notifBody = extra?.amount || '';
+              break;
+            case 'scheduled_published':
+              notifTitle = 'Scheduled post published';
+              notifBody = extra?.title || '';
+              break;
+            case 'payouts':
+              notifTitle = 'Rewards received';
+              notifBody = extra?.amount || '';
+              break;
+            case 'account_update':
+              notifTitle = 'Account updated';
+              notifBody = 'Your account details were updated';
+              break;
+            case 'weekly_earnings':
+              notifTitle = 'Weekly earnings';
+              notifBody = extra?.total_usd ? `$${extra.total_usd}` : '';
+              break;
+            case 'follow':
+              notifTitle = `@${source} followed @${target}`;
+              break;
+            case 'unfollow':
+              notifTitle = `@${source} unfollowed @${target}`;
+              break;
+            case 'ignore':
+              notifTitle = `@${source} ignored @${target}`;
+              break;
+            case 'blacklist':
+              notifTitle = `@${source} blacklisted @${target}`;
+              break;
+            case 'tags': {
+              // A post lists every followed tag it matched and shows the first; a
+              // bundle names its one tag and carries a count.
+              const wsTag = extra?.tags?.[0] || extra?.tag || '';
+              notifTitle = extra?.count
+                ? `${extra.count} new posts in #${wsTag}`
+                : `@${source} posted in #${wsTag}`;
+              notifBody = extra?.title || '';
+              break;
+            }
+            default:
+              notifTitle = `@${source}`;
+              break;
+          }
+
+          // Build FCM-compatible notification object
+          const fcmFormat = {
+            data: {
+              id: `ws-${Date.now()}`,
+              source,
+              target,
+              type,
+              // For mentions/replies: extra.permlink
+              // For transfers/delegations: no permlink needed
+              permlink1: (extra?.permlink || '').substring(0, 250),
+              permlink2: (extra?.permlink || '').substring(250, 500),
+              permlink3: (extra?.permlink || '').substring(500, 750),
+              // For transfers/delegations: extra.amount
+              amount: extra?.amount || '',
+              // For a followed-tag bundle: the tag feed to open
+              tag: extra?.tags?.[0] || extra?.tag || '',
+            },
+            notification: {
+              title: notifTitle,
+              body: notifBody,
+            },
+          };
+
+          console.log('Converted websocket to FCM format:', fcmFormat);
+          this.setState({
+            foregroundNotificationData: fcmFormat,
+          });
+        }
+
+        // Workaround: Force refresh notification tab if active
+        if (activeBottomTab === ROUTES.TABBAR.NOTIFICATION) {
+          dispatch(updateActiveBottomTab(''));
+          dispatch(updateActiveBottomTab(ROUTES.TABBAR.NOTIFICATION));
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.warn('Notification websocket error:', error);
+      };
+
+      ws.onclose = (event) => {
+        console.log('Notification websocket closed:', event.code, event.reason);
+        this._notificationWs = null;
+
+        // Only reconnect if not a normal closure and component is still mounted
+        if (event.code !== 1000 && this._wsReconnectAttempts < 5) {
+          this._wsReconnectAttempts++;
+          const delay = Math.min(1000 * 2 ** this._wsReconnectAttempts, 30000);
+          const latestUsername =
+            this.props?.currentAccount?.name || this._notificationUsername || username;
+          console.log(
+            `Reconnecting websocket in ${delay}ms (attempt ${this._wsReconnectAttempts})`,
+          );
+
+          this._wsReconnectTimer = setTimeout(() => {
+            if (latestUsername) {
+              this._connectNotificationServer(latestUsername);
+            }
+          }, delay);
+        }
+      };
+    } catch (error) {
+      console.error('Failed to create notification websocket:', error);
+    }
+  };
+
+  _repairUserAccountData = async (username: any) => {
     const { dispatch, intl, otherAccounts, currentAccount, pinCode } = this.props;
 
     // use current account variant if it exist of target account;
-    const _accounts = currentAccount.username === username ? [currentAccount] : otherAccounts;
+    const _accounts = currentAccount.name === username ? [currentAccount] : otherAccounts;
     return repairUserAccountData(username, dispatch, intl, _accounts, pinCode);
   };
 
@@ -650,8 +1051,8 @@ class ApplicationContainer extends Component {
     }
   };
 
-  _logout = async (username) => {
-    const { otherAccounts, dispatch, intl } = this.props;
+  _logout = async (username: any) => {
+    const { currentAccount, otherAccounts, dispatch, intl } = this.props;
 
     try {
       const response = await removeUserData(username);
@@ -660,10 +1061,13 @@ class ApplicationContainer extends Component {
         throw response;
       }
       this._updatePrevLoggedInUsersList(username);
-      this._enableNotification(username, false);
+
+      const encAccessToken =
+        currentAccount.name === username ? currentAccount?.local?.accessToken : null;
+      this._enableNotification(username, false, null, encAccessToken);
 
       // switch account if other account exist
-      const _otherAccounts = otherAccounts.filter((user) => user.username !== username);
+      const _otherAccounts = otherAccounts.filter((user: any) => user.username !== username);
 
       if (_otherAccounts.length > 0) {
         const targetAccount = _otherAccounts[0];
@@ -680,74 +1084,138 @@ class ApplicationContainer extends Component {
         });
         setExistUser(false);
         dispatch(isPinCodeOpen(false));
-        dispatch(setEncryptedUnlockPin(encryptKey(Config.DEFAULT_KEU, Config.PIN_KEY)));
+        dispatch(setEncryptedUnlockPin(encryptKey(Config.DEFAULT_PIN!, Config.PIN_KEY!)) as any);
       }
 
       removeSCAccount(username);
       dispatch(setFeedPosts([]));
       dispatch(setInitPosts([]));
       dispatch(removeOtherAccount(username));
+
+      // Drop the shared Mattermost PAT + bootstrap cache so a request
+      // already on the wire can't resurrect the session for the logged-out
+      // user. The generation counter inside bootstrapMattermostSession
+      // makes any in-flight resolve a no-op. If another account is still
+      // logged in, its next chat access will re-bootstrap cleanly.
+      setChatApiToken(null);
+      clearMattermostBootstrapCache();
+
       dispatch(logoutDone());
     } catch (err) {
       dispatch(logoutDone());
-      Alert.alert(intl.formatMessage({ id: 'alert.fail' }), err.message);
+      Alert.alert(intl.formatMessage({ id: 'alert.fail' }), (err as any).message);
       this._repairUserAccountData(username);
     }
   };
 
-  _enableNotification = async (username, isEnable, settings = null, accessToken = null) => {
-    // compile notify_types
-    let notify_types = [];
-    if (settings) {
-      const notifyTypesConst = {
-        voteNotification: 1,
-        mentionNotification: 2,
-        followNotification: 3,
-        commentNotification: 4,
-        reblogNotification: 5,
-        transfersNotification: 6,
-        favoriteNotification: 13,
-        bookmarkNotification: 15,
-      };
+  _enableNotification = async (
+    username: any,
+    isEnable: any,
+    settings = null,
+    encAccesstoken = null,
+  ) => {
+    const accessToken = encAccesstoken ? decryptKey(encAccesstoken, Config.DEFAULT_PIN) : null;
 
+    // compile notify_types
+    let notify_types: any[] = [];
+    const notifyTypesConst = {
+      voteNotification: 1,
+      mentionNotification: 2,
+      followNotification: 3,
+      commentNotification: 4,
+      reblogNotification: 5,
+      transfersNotification: 6,
+      favoriteNotification: 13,
+      bookmarkNotification: 15,
+      tagsNotification: 23,
+      delegationsNotification: 10,
+      payoutsNotification: 19,
+      accountUpdateNotification: 20,
+      weeklyEarningsNotification: 21,
+      scheduledPublishedNotification: 22,
+    };
+
+    if (settings) {
       Object.keys(settings).forEach((item) => {
-        if (notifyTypesConst[item] && settings[item]) {
-          notify_types.push(notifyTypesConst[item]);
+        if ((notifyTypesConst as any)[item] && settings[item]) {
+          notify_types.push((notifyTypesConst as any)[item]);
         }
       });
     } else {
-      notify_types = [1, 2, 3, 4, 5, 6, 13, 15];
+      // Derived, not hardcoded. The literal here used to be [1,2,3,4,5,6,13,15,22],
+      // which omitted 10, 19, 20 and 21, so a fresh login with no settings yet got no
+      // delegations, payouts, account_update or weekly_earnings pushes until it saved
+      // settings once. A hand-maintained copy of this map is guaranteed to drift.
+      notify_types = Object.values(notifyTypesConst);
     }
 
-    getMessaging()
-      .getToken()
-      .then((token) => {
-        setPushToken(
-          {
-            username,
-            token: isEnable ? token : '',
-            system: `fcm-${Platform.OS}`,
-            allows_notify: Number(isEnable),
-            notify_types,
-          },
-          accessToken,
+    try {
+      // Check if we're on iOS simulator where APNS isn't available
+      const isSimulator = await DeviceInfo.isEmulator();
+      if (Platform.OS === 'ios' && isSimulator) {
+        console.log('Skipping FCM token on iOS simulator - APNS not available');
+        return;
+      }
+
+      // Request permission first to ensure APNS is set up on iOS
+      const authStatus = await getMessaging().requestPermission();
+      const enabled =
+        authStatus === 1 || // authorized
+        authStatus === 2; // provisional
+
+      if (!enabled) {
+        console.log('Notification permission not granted');
+        return;
+      }
+
+      const token = await getMessaging().getToken();
+      console.log('FCM Token obtained:', !!token);
+      saveNotificationSetting(
+        accessToken!,
+        username,
+        `fcm-${Platform.OS}`,
+        Number(isEnable),
+        notify_types,
+        token,
+      );
+    } catch (error) {
+      // Handle platform-specific FCM errors gracefully
+      const errorMessage = (error as any).message || '';
+      const isUnknownError = (error as any).code === 'messaging/unknown';
+
+      if (Platform.OS === 'ios' && (isUnknownError || errorMessage.includes('APNS'))) {
+        // iOS: APNS not available (likely simulator or development environment)
+        console.log('APNS not available on iOS - likely simulator or missing configuration');
+      } else if (
+        Platform.OS === 'android' &&
+        (errorMessage.includes('MISSING_INSTANCEID_SERVICE') ||
+          errorMessage.includes('SERVICE_NOT_AVAILABLE') ||
+          errorMessage.includes('AUTHENTICATION_FAILED'))
+      ) {
+        // Android: Google Play Services issues (common on emulators, custom ROMs, outdated devices)
+        console.log(
+          'Google Play Services not available or misconfigured - FCM disabled for this device',
         );
-      });
+        // Don't send to Sentry as this is expected on some Android configurations
+      } else {
+        // Unexpected error - log and report to Sentry
+        console.warn('Failed to enable notification:', error);
+        Sentry.captureException(error);
+      }
+    }
   };
 
-  _switchAccount = async (targetAccount) => {
+  _switchAccount = async (targetAccount: any) => {
     const { dispatch, isConnected, pinCode, intl } = this.props;
-
-    dispatch(updateCurrentAccount(targetAccount));
 
     if (!isConnected) return;
 
     try {
-      const accountData = await switchAccount(targetAccount.username);
+      const accountData: any = await switchAccount(targetAccount.username);
       let realmData = await getUserDataWithUsername(targetAccount.username);
 
-      let _currentAccount = accountData;
-      _currentAccount.username = accountData.name;
+      let _currentAccount: any = accountData;
+      _currentAccount.name = accountData.name;
       [_currentAccount.local] = realmData;
 
       if (!realmData[0]) {
@@ -772,8 +1240,11 @@ class ApplicationContainer extends Component {
         );
       }
 
-      // check session expiry in case of HIVE_AUTH
-      if (realmData[0].authType === AUTH_TYPE.HIVE_AUTH) {
+      // check session expiry for session-based auth (HiveAuth or HiveSigner)
+      if (
+        realmData[0].authType === AUTH_TYPE.HIVE_AUTH ||
+        realmData[0].authType === AUTH_TYPE.STEEM_CONNECT
+      ) {
         this._checkHiveAuthExpiry(realmData[0]);
       }
 
@@ -781,9 +1252,20 @@ class ApplicationContainer extends Component {
       _currentAccount = await this._refreshAccessToken(_currentAccount);
 
       try {
-        _currentAccount.unread_activity_count = await getUnreadNotificationCount();
-        _currentAccount.pointsSummary = await getPointsSummary(_currentAccount.username);
-        _currentAccount.mutes = await getMutes(_currentAccount.username);
+        const queryClient = getQueryClient();
+        const accessToken =
+          (_currentAccount?.local?.accessToken
+            ? decryptKey(_currentAccount.local.accessToken, getDigitPinCode(pinCode))
+            : '') ?? '';
+        _currentAccount.unread_activity_count = await queryClient.fetchQuery(
+          getNotificationsUnreadCountQueryOptions(_currentAccount.name, accessToken),
+        );
+        _currentAccount.pointsSummary = await getPointsSummary(_currentAccount.name);
+
+        // Fetch muted users using SDK query
+        _currentAccount.mutes = await queryClient.fetchQuery(
+          getMutedUsersQueryOptions(_currentAccount.name),
+        );
       } catch (err) {
         console.warn(
           'Optional user data fetch failed, account can still function without them',
@@ -792,24 +1274,38 @@ class ApplicationContainer extends Component {
       }
 
       dispatch(updateCurrentAccount(_currentAccount));
-      dispatch(fetchSubscribedCommunities(_currentAccount.username));
+      dispatch(fetchSubscribedCommunities(_currentAccount.name));
+
+      // Ensure notification channel is connected for the new account
+      try {
+        const fcmAvailable = await this._checkFCMAvailability();
+        if (!fcmAvailable) {
+          console.log('Connecting to WebSocket notification server (FCM not available)');
+          this._connectNotificationServer(_currentAccount.name);
+        } else {
+          console.log('Using FCM for notifications (WebSocket not needed)');
+          this._disconnectNotificationServer();
+        }
+      } catch (wsErr) {
+        console.warn('Failed to update notification channel after account switch', wsErr);
+      }
     } catch (err) {
       dispatch(
         toastNotification(
           `${intl.formatMessage(
             { id: 'alert.logging_out' },
             { username: targetAccount.username },
-          )}\n${err.message}`,
+          )}\n${(err as any).message}`,
         ),
       );
       this._logout(targetAccount.username);
     }
   };
 
-  UNSAFE_componentWillReceiveProps(nextProps) {
+  UNSAFE_componentWillReceiveProps(nextProps: any) {
     const {
       isDarkTheme: _isDarkTheme,
-      currentAccount: { username },
+      currentAccount: { name },
       selectedLanguage,
       isLogingOut,
       isConnected,
@@ -838,7 +1334,7 @@ class ApplicationContainer extends Component {
     }
 
     if (isLogingOut !== nextProps.isLogingOut && nextProps.isLogingOut) {
-      this._logout(username);
+      this._logout(name);
     }
 
     if (isConnected !== null && isConnected !== nextProps.isConnected && nextProps.isConnected) {
@@ -875,32 +1371,32 @@ class ApplicationContainer extends Component {
 export default connect(
   (state) => ({
     // Application
-    isDarkTheme: state.application.isDarkTheme,
-    selectedLanguage: state.application.language,
-    isPinCodeOpen: state.application.isPinCodeOpen,
-    encUnlockPin: state.application.encUnlockPin,
+    isDarkTheme: selectIsDarkTheme(state),
+    selectedLanguage: selectLanguage(state),
+    isPinCodeOpen: selectIsPinCodeOpen(state),
+    encUnlockPin: selectEncUnlockPin(state),
 
-    isLoggedIn: state.application.isLoggedIn, // TODO: remove as is not being used in this class
-    isConnected: state.application.isConnected,
-    api: state.application.api,
-    isGlobalRenderRequired: state.application.isRenderRequired,
-    lastUpdateCheck: state.application.lastUpdateCheck,
-    settingsMigratedV2: state.application.settingsMigratedV2,
-    isNotificationsEnabled: state.application.isNotificationOpen,
-    notificationDetails: state.application.notificationDetails,
+    isLoggedIn: selectIsLoggedIn(state),
+    isConnected: selectIsConnected(state),
+    api: selectApi(state),
+    isGlobalRenderRequired: selectIsGlobalRenderRequired(state),
+    lastUpdateCheck: selectLastUpdateCheck(state),
+    settingsMigratedV2: selectSettingsMigratedV2(state),
+    isNotificationsEnabled: selectIsNotificationOpen(state),
+    notificationDetails: selectNotificationDetails(state),
 
     // Account
-    unreadActivityCount: state.account.currentAccount.unread_activity_count,
-    currentAccount: state.account.currentAccount,
-    otherAccounts: state.account.otherAccounts,
-    prevLoggedInUsers: state.account.prevLoggedInUsers,
-    pinCode: state.application.pin,
+    unreadActivityCount: selectCurrentAccountUnreadActivityCount(state),
+    currentAccount: selectCurrentAccount(state),
+    otherAccounts: selectOtherAccounts(state),
+    prevLoggedInUsers: selectPrevLoggedInUsers(state),
+    pinCode: selectPin(state),
 
     // UI
-    toastNotification: state.ui.toastNotification,
-    activeBottomTab: state.ui.activeBottomTab,
-    isLogingOut: state.ui.isLogingOut,
-    rcOffer: state.ui.rcOffer,
+    toastNotification: (state as any).ui.toastNotification,
+    activeBottomTab: (state as any).ui.activeBottomTab,
+    isLogingOut: (state as any).ui.isLogingOut,
+    rcOffer: (state as any).ui.rcOffer,
   }),
   (dispatch) => ({
     dispatch,

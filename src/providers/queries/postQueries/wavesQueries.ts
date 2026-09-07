@@ -1,408 +1,358 @@
 import {
+  InfiniteData,
   QueryKey,
   UseMutationOptions,
+  useInfiniteQuery,
   useMutation,
-  useQueries,
+  useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 
-import { unionBy, isArray } from 'lodash';
+import { isArray } from 'lodash';
 import { useDispatch } from 'react-redux';
 import { useIntl } from 'react-intl';
-import { getDiscussionCollection, getAccountPosts, deleteComment } from '../../hive/dhive';
-
-import QUERIES from '../queryKeys';
-import { delay } from '../../../utils/editor';
 import {
-  injectPostCache,
-  injectVoteCache,
-  mapDiscussionToThreads,
-} from '../../../utils/postParser';
+  getAccountPosts,
+  getPromotedPostsQuery,
+  getWavesFeedQueryOptions,
+  useDeleteComment,
+  WaveEntry,
+} from '@ecency/sdk';
+
+import { parsePost } from '../../../utils/postParser';
+import { WAVES_PRIMARY_HOST } from '../../../constants/waves';
 import { useAppSelector } from '../../../hooks';
 import { toastNotification } from '../../../redux/actions/uiAction';
 import { useBotAuthorsQuery } from './postQueries';
+import { selectCurrentAccount, selectCurrentAccountMutes } from '../../../redux/selectors';
+import { useAuthContext } from '../../sdk';
 
-export const useWavesQuery = (host: string) => {
+type CombinedWavesQueryOptions = ReturnType<typeof getWavesFeedQueryOptions>;
+
+/**
+ * Drives a waves feed from the single combined, cross-container esync endpoint.
+ * Every flavour (for-you / following / tag / account) is powered by the same
+ * hook; the flavour is encoded entirely in the `queryOptions` passed in, built
+ * via `getWavesFeedQueryOptions({ observer, following, tag, author })`. One
+ * keyset-paginated infinite query backs the list — the per-container
+ * primary/fallback host chaining is gone, the backend already merges every
+ * container in time order. This hook layers the shared visibility filter,
+ * promoted-wave interleaving, optimistic delete and pull-to-refresh on top.
+ */
+export const useWavesQuery = (
+  queryOptions: CombinedWavesQueryOptions,
+  // When true (for-you / following feeds, not tag feeds), promoted waves are
+  // fetched and interleaved into the list like the web waves feed.
+  injectPromoted = false,
+  // When true (the firehose feeds), waves from authors the viewer mutes are
+  // dropped client-side. Pass false for the profile author feed: you opened
+  // that profile on purpose, so a mute of theirs must not blank their waves
+  // (consistent with that feed omitting the server-side `observer`).
+  applyMuteFilter = true,
+) => {
   const queryClient = useQueryClient();
   const dispatch = useDispatch();
   const intl = useIntl();
 
-  const cache = useAppSelector((state) => state.cache);
-  const mutes = useAppSelector((state) => state.account.currentAccount.mutes);
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const pinCode = useAppSelector((state) => state.application.pin);
+  const mutes = useAppSelector(selectCurrentAccountMutes);
+  const currentAccount = useAppSelector(selectCurrentAccount);
 
-  // TOTO: import bot authors query here
   const botAuthorsQuery = useBotAuthorsQuery();
-
-  const cacheRef = useRef(cache);
-
-  const cachedVotes = cache.votesCollection;
-  const lastCacheUpdate = cache.lastUpdate;
+  const authContext = useAuthContext();
+  const sdkDeleteMutation = useDeleteComment(currentAccount?.name, authContext, 'async');
 
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [activePermlinks, setActivePermlinks] = useState<string[]>([]);
 
-  const wavesIndexCollection = useRef<{ [key: string]: string }>({});
-
-  const _initialContainerPermlinks = useMemo(
-    () => queryClient.getQueryData<string[]>([QUERIES.WAVES.INITIAL_CONTAINERS, host]) || [],
-    [],
-  );
-  const [permlinksBucket, setPermlinksBucket] = useState<string[]>(_initialContainerPermlinks);
-
-  // query initialization
-  const wavesQueries = useQueries({
-    queries: activePermlinks.map((pagePermlink, index) => ({
-      queryKey: [QUERIES.WAVES.GET, host, pagePermlink, index], // index at end is used to track query hydration
-      queryFn: () => _fetchWaves(pagePermlink),
-      initialData: [],
-    })),
+  const wavesQuery = useInfiniteQuery({
+    ...queryOptions,
+    refetchInterval: 60000,
   });
 
-  const _lastItem = wavesQueries[wavesQueries.length - 1];
+  // Promoted waves (only for for-you / following feeds, never tag feeds). The
+  // SDK keys this separately from the home-feed promoted query, so the two
+  // never collide. Interleaved into the list below, like the web waves feed.
+  const promotedQuery = useQuery({
+    ...getPromotedPostsQuery<WaveEntry>('waves'),
+    enabled: injectPromoted,
+  });
 
-  // hook to update cache reference,
-  // workaround required since query fucntion do get passed an
-  // updated copy for states that are not part of query key and contexet while conext is not
-  // supported by useQueries
-  useEffect(() => {
-    cacheRef.current = cache;
-  }, [cache]);
+  const data = useMemo(() => {
+    const flatData: WaveEntry[] = wavesQuery.data?.pages?.flat() ?? [];
+    const botAuthors = botAuthorsQuery.data ?? [];
 
-  useEffect(() => {
-    _fetchPermlinks('', true);
-  }, []);
-
-  useEffect(() => {
-    if (permlinksBucket.length) {
-      // if first elements permlinks do not match, means there is a new container, push at first
-      if (permlinksBucket[0] !== activePermlinks[0]) {
-        activePermlinks.splice(0, 0, permlinksBucket[0]);
+    // Shared visibility filter: drop empty parses, muted authors, downvoted /
+    // gray waves, and bot authors. Applied to BOTH organic and promoted waves
+    // so the user's own mutes (and bot/gray hiding) hold even for promoted cards.
+    // Server-side observer-mute already excludes muted authors from the combined
+    // feed; this client filter stays as a backstop (and still covers promoted
+    // cards, which bypass the feed query).
+    const isVisibleWave = (post: any) => {
+      if (!post) {
+        return false;
       }
-      // permlinks bucket is updated, it needs to be connect with active one to start chain again
-      else {
-        activePermlinks.push(permlinksBucket[activePermlinks.length]);
+      // discard wave if author is muted (skipped for the profile author feed)
+      if (applyMuteFilter && isArray(mutes) && mutes.indexOf(post.author) >= 0) {
+        return false;
       }
-      setActivePermlinks([...activePermlinks]);
-    }
-  }, [permlinksBucket]);
-
-  useEffect(() => {
-    const _latestData = _lastItem?.data;
-    if (!_latestData || _latestData.length < 10) {
-      _fetchNextPage();
-    }
-  }, [_lastItem?.data]);
-
-  useEffect(() => {
-    // check cache is recently updated and take post path
-    if (lastCacheUpdate) {
-      const _timeElapsed = new Date().getTime() - lastCacheUpdate.updatedAt;
-      if (lastCacheUpdate.type === 'vote' && _timeElapsed < 5000) {
-        _injectPostCache(lastCacheUpdate.postPath);
+      // discard if wave is downvoted or marked gray
+      if (post.isMuted) {
+        return false;
       }
+      // discard bot authors
+      if (botAuthors.includes(post.author)) {
+        return false;
+      }
+      return true;
+    };
+
+    const parsed = flatData
+      // Shallow-copy before parsing: parsePost mutates its argument, and `flatData`
+      // holds the SDK query cache objects (mutating re-renders the body each refetch).
+      // The SDK normalizes `created` on the combined feed, so no client-side
+      // timestamp mapping is needed here. Organic waves are never promoted (isPromoted=false).
+      .map((item) => parsePost({ ...item }, currentAccount?.name, false))
+      .filter(isVisibleWave);
+
+    if (!injectPromoted || !Array.isArray(promotedQuery.data) || !promotedQuery.data.length) {
+      return parsed;
     }
-  }, [lastCacheUpdate]);
 
-  const _injectPostCache = async (postPath: string) => {
-    // using post path get index of query key where that post exists
-    const _containerPermlink = wavesIndexCollection.current[postPath];
-    const _containerIndex = activePermlinks.indexOf(_containerPermlink);
-    const _voteCache = cachedVotes[postPath];
-
-    if (_containerIndex >= 0 && _voteCache) {
-      // mean data exist, get query data, update query data by finding post and injecting cache
-      const _qData: any[] | undefined = wavesQueries[_containerIndex].data;
-
-      if (_qData) {
-        const _postIndex = _qData.findIndex(
-          (item) => lastCacheUpdate.postPath === `${item.author}/${item.permlink}`,
-        );
-        const _post = _qData[_postIndex];
-
-        if (_post) {
-          // inject cache and set query data
-          const _cPost = injectVoteCache(_post, _voteCache);
-          _qData.splice(_postIndex, 1, _cPost);
-          queryClient.setQueryData(
-            [QUERIES.WAVES.GET, host, _containerPermlink, _containerIndex],
-            [..._qData],
-          ); // TODO: use container permlink as well
+    // Interleave promoted waves exactly like the web feed (waves-list-view):
+    // parse as promoted, apply the same visibility filter, drop organic copies
+    // (keep the promoted version), then splice promoted cards in at the web
+    // cadence until the queue drains.
+    const promotedWaves = promotedQuery.data
+      .map((item) => parsePost({ ...item }, currentAccount?.name, true))
+      .filter(isVisibleWave);
+    if (!promotedWaves.length) {
+      return parsed;
+    }
+    const promotedKeys = new Set(promotedWaves.map((wave) => `${wave.author}/${wave.permlink}`));
+    const queue = [...promotedWaves];
+    return parsed
+      .filter((post) => !promotedKeys.has(`${post.author}/${post.permlink}`))
+      .reduce((acc, post, index) => {
+        acc.push(post);
+        // Matches the web feed's cadence (`index % 4 === 1`): the first promoted
+        // card appears after the 2nd organic wave, then after every 4th.
+        if (index % 4 === 1 && queue.length) {
+          const promoted = queue.shift();
+          if (promoted) {
+            acc.push(promoted);
+          }
         }
-      }
+        return acc;
+      }, [] as typeof parsed);
+  }, [
+    wavesQuery.data,
+    mutes,
+    applyMuteFilter,
+    botAuthorsQuery.data,
+    currentAccount?.name,
+    promotedQuery.data,
+    injectPromoted,
+  ]);
+
+  const hasNextPage = !!wavesQuery.hasNextPage;
+  const { isFetchingNextPage, isLoading } = wavesQuery;
+
+  const fetchNextPage = useCallback(() => {
+    if (wavesQuery.hasNextPage && !wavesQuery.isFetchingNextPage) {
+      return wavesQuery.fetchNextPage();
     }
-  };
+    return undefined;
+  }, [wavesQuery.hasNextPage, wavesQuery.isFetchingNextPage, wavesQuery.fetchNextPage]);
 
-  const _fetchPermlinks = async (startPermlink = '', refresh = false) => {
-    setIsLoading(true);
-    try {
-      const query: any = {
-        account: host,
-        start_author: startPermlink ? host : '',
-        start_permlink: startPermlink,
-        limit: 5,
-        observer: '',
-        sort: 'posts',
-      };
-
-      const result = await getAccountPosts(query);
-
-      const _fetchedPermlinks = result.map((post) => post.permlink);
-      console.log('permlinks fetched', _fetchedPermlinks);
-
-      const _permlinksBucket = refresh
-        ? _fetchedPermlinks
-        : [...permlinksBucket, ..._fetchedPermlinks];
-      setPermlinksBucket(_permlinksBucket);
-
-      if (refresh) {
-        queryClient.setQueryData([QUERIES.WAVES.INITIAL_CONTAINERS, host], _permlinksBucket);
-        // precautionary delay of 200ms to let state update before concluding promise,
-        // it is effective for waves refresh routine.
-        await delay(200);
-      }
-    } catch (err) {
-      console.warn('failed to fetch waves permlinks');
-    }
-
-    setIsLoading(false);
-  };
-
-  const _fetchWaves = async (pagePermlink: string) => {
-    console.log('fetching waves from:', host, pagePermlink);
-    const response = await getDiscussionCollection(host, pagePermlink);
-
-    // inject cache here...
-    const _cachedComments = cacheRef.current.commentsCollection;
-    const _cachedVotes = cacheRef.current.votesCollection;
-    const _lastCacheUpdate = cacheRef.current.lastCacheUpdate;
-    const _cResponse = injectPostCache(response, _cachedComments, _cachedVotes, _lastCacheUpdate);
-
-    const _threadedComments = await mapDiscussionToThreads(_cResponse, host, pagePermlink, 1);
-
-    if (!_threadedComments) {
-      throw new Error('Failed to parse waves');
-    }
-
-    const _filteredComments = _threadedComments.filter(
-      (item) =>
-        item.net_rshares >= 0 &&
-        !item.stats?.gray &&
-        !item.stats.hide &&
-        !botAuthorsQuery.data.includes(item.author),
-    );
-
-    _filteredComments.sort((a, b) => (new Date(a.created) > new Date(b.created) ? -1 : 1));
-    _filteredComments.forEach((item) => {
-      wavesIndexCollection.current[`${item.author}/${item.permlink}`] = pagePermlink;
-    });
-
-    console.log('new waves fetched', _filteredComments);
-
-    return _filteredComments || [];
-  };
-
-  const _fetchNextPage = () => {
-    if (!_lastItem || _lastItem.isFetching) {
-      return;
-    }
-
-    const _nextPagePermlink = permlinksBucket[activePermlinks.length];
-
-    if (_nextPagePermlink && !activePermlinks.includes(_nextPagePermlink)) {
-      console.log('updating next page permlink', _nextPagePermlink);
-      activePermlinks.push(_nextPagePermlink);
-      setActivePermlinks([...activePermlinks]);
-    } else {
-      console.log('fetching new containers');
-      _fetchPermlinks(permlinksBucket[permlinksBucket.length - 1]);
-    }
-  };
-
-  const _refresh = async () => {
+  const refresh = async () => {
     setIsRefreshing(true);
-    setPermlinksBucket([]);
-    setActivePermlinks([]);
-    await _fetchPermlinks('', true);
-    await wavesQueries[0].refetch();
-    setIsRefreshing(false);
-  };
-
-  const _data = unionBy(...wavesQueries.map((query) => query.data), 'url');
-
-  const _filteredData = useMemo(
-    () =>
-      _data.filter((post) => {
-        let _status = true;
-        // discard wave if author is muted
-        if (isArray(mutes) && mutes.indexOf(post?.author) > 0) {
-          _status = false;
-        }
-
-        // discard if wave is downvoted or marked gray
-        else if (post.net_rshares < 0 || post.stats?.gray || post.stats?.hide) {
-          _status = false;
-        }
-
-        return _status;
-      }),
-    // (isArray(mutes) ? mutes.indexOf(post?.author) < 0 : true)),
-    [mutes, _data],
-  );
-
-  const _lastestWavesFetch = async () => {
-    await _fetchPermlinks('', true);
-    const _prevLatestWave = _filteredData[0];
-    const _firstQuery = wavesQueries[0];
-
-    if (!_firstQuery) {
-      return [];
-    }
-
-    const queryResponse = await _firstQuery.refetch();
-
-    const _newData: any[] = queryResponse.data || [];
-
-    // check if new waves are available
-    const _lastIndex = _newData?.findIndex(
-      (item) => item.author + item.permlink === _prevLatestWave.author + _prevLatestWave.permlink,
-    );
-
-    let _newWaves: any[] = [];
-    if (_lastIndex && _lastIndex !== 0) {
-      if (_lastIndex < 0) {
-        _newWaves = _newData?.slice(0, 5) || [];
-      } else {
-        _newWaves = _newData?.slice(0, _lastIndex) || [];
+    try {
+      await wavesQuery.refetch();
+      // Keep interleaved promoted waves fresh on pull-to-refresh too; skip when
+      // promoted injection is off (tag feeds / profile tab) so we don't fire a
+      // disabled query.
+      if (injectPromoted) {
+        await promotedQuery.refetch();
       }
+    } finally {
+      setIsRefreshing(false);
     }
-
-    return _newWaves;
   };
 
-  // wave delete mutation to delete wave and update query
-  const deleteWave = async ({ _permlink, _parent_permlink }: any) => {
-    const response = await deleteComment(currentAccount, pinCode, _permlink);
-
-    if (!response?.id) {
-      throw new Error('Failed to delete the wave');
-    }
-    return { _permlink, _parent_permlink };
-  };
-
-  const deleteMutation = useMutation(deleteWave, {
-    onSuccess: ({ _permlink, _parent_permlink }) => {
-      // find container index based on _parent_permlink of comment/wave being deleted
-      const _containerIndex = activePermlinks.indexOf(_parent_permlink);
-      if (_containerIndex >= 0) {
-        // get query data from wavesQueries based on container index
-        const _qData: any[] | undefined = wavesQueries[_containerIndex].data;
-        // create query key for updating query data
-        const _qKey = [QUERIES.WAVES.GET, host, _parent_permlink, _containerIndex];
-        if (_qData && _qData.length > 0) {
-          // filter out comment/wave which is deleted and set query data
-          const _filteredData = _qData.filter((w) => w.permlink !== _permlink);
-          queryClient.setQueryData(_qKey, _filteredData);
-        }
-      }
-      dispatch(toastNotification(intl.formatMessage({ id: 'alert.success' })));
-    },
-    onError: (error) => {
-      console.log('Failed to delete wave:', error);
-      dispatch(toastNotification(intl.formatMessage({ id: 'alert.error' })));
-    },
-  });
-
-  return {
-    data: _filteredData,
-    isRefreshing,
-    isLoading: isLoading || _lastItem?.isLoading || _lastItem?.isFetching,
-    fetchNextPage: _fetchNextPage,
-    latestWavesFetch: _lastestWavesFetch,
-    refresh: _refresh,
-    deleteWave: deleteMutation.mutate,
-  };
-};
-
-export const usePublishWaveMutation = () => {
-  const queryClient = useQueryClient();
-
-  // id is options, if no id is provided program marks all notifications as read;
-  const _mutationFn = async (cachePostData: any) => {
-    // TODO: lates port wave publishing here or introduce post publishing mutation;
-    if (cachePostData) {
-      // TODO: expand to check multiple wave hosts;{
-      const _host = cachePostData.parent_author;
-
-      console.log('returning waves host', _host);
-      return _host;
-    }
-
-    throw new Error('invalid mutations data');
-  };
-
-  const _options: UseMutationOptions<string, unknown, any, void> = {
-    onMutate: async (cacheCommentData: any) => {
-      // TODO: find a way to optimise mutations by avoiding too many loops
-      console.log('on mutate data', cacheCommentData);
-
-      const _host = cacheCommentData.parent_author;
-
-      // update query data
-      const containerQueriesData: [QueryKey, string[] | undefined][] = queryClient.getQueriesData([
-        QUERIES.WAVES.INITIAL_CONTAINERS,
-        _host,
-      ]);
-
-      if (!containerQueriesData[0][1]) {
+  // Memoized so its identity is stable across renders. WavesFeed's
+  // registration effect depends on this function; without memoization the
+  // effect re-fires on every parent render, registering/unregistering the
+  // feed's slot in the parent's deleter Map and briefly leaving the slot
+  // empty between cleanup and re-register.
+  const deleteWave = useCallback(
+    async ({
+      _permlink,
+      _parent_permlink,
+      _parent_author,
+    }: {
+      _permlink: string;
+      _parent_permlink: string;
+      _parent_author?: string;
+    }) => {
+      if (!currentAccount?.name) {
         return;
       }
 
-      // get query data of first waves container
-      const _containerKey: string = containerQueriesData[0][1][0];
-      const _queryKey = [QUERIES.WAVES.GET, _host, _containerKey, 0];
-      const queryData: any[] | undefined = queryClient.getQueryData(_queryKey);
+      // Each wave carries its own container account (its parent_author), which
+      // decides which container to broadcast the delete against. Fall back to
+      // the primary host only for callers that don't carry it.
+      const targetHost = _parent_author || WAVES_PRIMARY_HOST;
 
-      console.log('query data', queryData);
+      try {
+        await sdkDeleteMutation.mutateAsync({
+          author: currentAccount.name,
+          permlink: _permlink,
+          parentAuthor: targetHost,
+          parentPermlink: _parent_permlink,
+        });
 
-      if (queryData && cacheCommentData) {
-        queryData.splice(0, 0, cacheCommentData);
-        queryClient.setQueryData(_queryKey, queryData);
+        // Prune the wave from this feed's combined-feed cache. Match author too
+        // — a permlink is only unique per author, so filtering on permlink alone
+        // could drop another user's wave that happens to share it.
+        queryClient.setQueryData<InfiniteData<WaveEntry[]>>(queryOptions.queryKey, (oldData) => {
+          if (!oldData) return oldData;
+          return {
+            ...oldData,
+            pages: oldData.pages.map((page) =>
+              page.filter((w) => !(w.author === currentAccount.name && w.permlink === _permlink)),
+            ),
+          };
+        });
+
+        dispatch(toastNotification(intl.formatMessage({ id: 'alert.success' })));
+      } catch (error) {
+        console.error('Failed to delete wave:', error);
+        dispatch(toastNotification(intl.formatMessage({ id: 'alert.error' })));
+      }
+    },
+    [
+      currentAccount?.name,
+      // Use `mutateAsync` (stable across renders via TanStack Query's
+      // internal ref) rather than the whole mutation result object, which
+      // gets a fresh identity on every state transition (idle → pending →
+      // success/error) and would re-rotate `deleteWave` after each delete.
+      sdkDeleteMutation.mutateAsync,
+      queryOptions.queryKey,
+      queryClient,
+      dispatch,
+      intl,
+    ],
+  );
+
+  return {
+    data,
+    isRefreshing,
+    isLoading,
+    isFetchingNextPage,
+    hasNextPage,
+    fetchNextPage,
+    refresh,
+    deleteWave,
+  };
+};
+
+interface PublishWaveContext {
+  previousData: InfiniteData<WaveEntry[]> | undefined;
+  queryKey: QueryKey;
+}
+
+export const usePublishWaveMutation = () => {
+  const queryClient = useQueryClient();
+  const currentAccount = useAppSelector(selectCurrentAccount);
+
+  // A freshly posted wave belongs at the top of the for-you combined feed; its
+  // cache key is the observer-scoped feed, where the observer is the poster.
+  const observer = currentAccount?.name || undefined;
+
+  const _mutationFn = async (cachePostData: any) => {
+    // The optimistic prepend happens in onMutate (and is rolled back in
+    // onError); this only validates the input. There is no return value —
+    // nothing downstream consumes one.
+    if (!cachePostData) {
+      throw new Error('invalid mutations data');
+    }
+  };
+
+  const _options: UseMutationOptions<void, unknown, any, PublishWaveContext> = {
+    onMutate: async (cacheCommentData: any) => {
+      const sdkOptions = getWavesFeedQueryOptions({ observer });
+
+      await queryClient.cancelQueries({ queryKey: sdkOptions.queryKey });
+
+      const previousData = queryClient.getQueryData<InfiniteData<WaveEntry[]>>(sdkOptions.queryKey);
+
+      queryClient.setQueryData<InfiniteData<WaveEntry[]>>(sdkOptions.queryKey, (oldData) => {
+        if (!oldData) {
+          return { pages: [[cacheCommentData as WaveEntry]], pageParams: [undefined] };
+        }
+        const firstPage = oldData.pages[0] ?? [];
+        return {
+          ...oldData,
+          pages: [[cacheCommentData as WaveEntry, ...firstPage], ...oldData.pages.slice(1)],
+        };
+      });
+
+      return { previousData, queryKey: sdkOptions.queryKey };
+    },
+
+    onError: (_error, _variables, context) => {
+      if (context?.queryKey) {
+        queryClient.setQueryData(context.queryKey, context.previousData);
       }
     },
 
-    onSuccess: async (host) => {
-      // TODO: get first container permlink here from initial containers
-      const queriesData = queryClient.getQueriesData([QUERIES.WAVES.INITIAL_CONTAINERS, host]);
-      const _queryKey = queriesData[0][0];
-      queryClient.invalidateQueries(_queryKey);
-    },
+    // No invalidate on success: the combined feed is esync-backed and a just-
+    // broadcast wave isn't indexed there yet, so an immediate refetch would drop
+    // the optimistic card. The 60s refetchInterval (and pull-to-refresh)
+    // reconciles the feed once esync has indexed it.
   };
 
-  return useMutation(_mutationFn, _options);
+  return useMutation({ mutationFn: _mutationFn, ..._options });
 };
 
-export const fetchLatestWavesContainer = async (host) => {
-  const query: any = {
-    account: host,
-    start_author: '',
-    start_permlink: '',
-    limit: 1,
-    observer: '',
-    sort: 'posts',
+/**
+ * Resolves the latest waves container to post a new wave into. Accepts an
+ * ordered list of hosts and returns the most recent container from the first
+ * host that has one — so new waves land on `hive.flow` when it has a
+ * container, and fall back to `ecency.waves` otherwise.
+ */
+export const fetchLatestWavesContainer = async (hosts: string | readonly string[]) => {
+  const hostList = Array.isArray(hosts) ? hosts : [hosts];
+  let lastError: unknown;
+
+  const fetchHostContainer = async (host: string) => {
+    const result = (await getAccountPosts('posts', host, '', '', 1, undefined)) || [];
+    return result[0];
   };
 
-  const result = await getAccountPosts(query);
+  type ContainerPost = Awaited<ReturnType<typeof fetchHostContainer>>;
 
-  const _latestPost = result[0];
-  console.log('lates waves post', host, _latestPost);
+  // Walk the hosts in order, resolving with the first one that has a
+  // container. Chained `.then`s keep the attempts sequential (so we don't
+  // hit every host when an earlier one already has a container) without an
+  // eslint-restricted `for await` loop.
+  const latestPost = await hostList.reduce<Promise<ContainerPost | undefined>>(
+    (chain, host) =>
+      chain.then((found) => {
+        if (found) {
+          return found;
+        }
+        return fetchHostContainer(host).catch((error) => {
+          lastError = error;
+          return undefined;
+        });
+      }),
+    Promise.resolve(undefined),
+  );
 
-  if (!_latestPost) {
-    throw new Error('Lates waves container could be not fetched');
+  if (!latestPost) {
+    throw lastError ?? new Error('Latest waves container could not be fetched');
   }
 
-  return _latestPost;
+  return latestPost;
 };

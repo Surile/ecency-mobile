@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, TouchableOpacity, Text, Platform } from 'react-native';
+import { View, TouchableOpacity, Text } from 'react-native';
 import Animated, { BounceInRight } from 'react-native-reanimated';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import { injectIntl, useIntl } from 'react-intl';
@@ -23,7 +23,7 @@ import { MainButton } from '../mainButton';
 interface ProfileEditFormProps {
   coverUrl: string;
   formData: any;
-  handleOnItemChange: () => void;
+  handleOnItemChange: (value?: any, key?: any) => void;
   handleOnSubmit: ({ goBack }: { goBack: boolean }) => void;
   intl: any;
   isDarkTheme: boolean;
@@ -46,11 +46,11 @@ const ProfileEditFormView = ({
   ...props
 }: ProfileEditFormProps) => {
   const intl = useIntl();
+  const defaultCover = isDarkTheme ? DARK_COVER_IMAGE : LIGHT_COVER_IMAGE;
 
   return (
     <View style={styles.container}>
       <KeyboardAwareScrollView
-        enableAutoAutomaticScroll={Platform.OS === 'ios'}
         contentContainerStyle={styles.contentContainer}
         enableOnAndroid={true}
       >
@@ -63,31 +63,28 @@ const ProfileEditFormView = ({
           <TouchableOpacity
             disabled={isUploading}
             style={styles.coverImgWrapper}
-            onPress={showImageUploadActions}
+            onPress={showImageUploadActions as any}
           >
             <ExpoImage
               style={styles.coverImg}
-              source={
-                coverUrl
-                  ? { uri: getResizedImage(coverUrl, 600) }
-                  : isDarkTheme
-                  ? DARK_COVER_IMAGE
-                  : LIGHT_COVER_IMAGE
-              }
+              source={coverUrl ? { uri: getResizedImage(coverUrl, 600) } : defaultCover}
+              contentFit="cover"
+              placeholder={defaultCover}
+              placeholderContentFit="cover"
             />
             <IconButton
               color="white"
               isLoading={isUploading}
               iconStyle={styles.addIcon}
               style={styles.addButton}
-              onPress={showImageUploadActions}
+              onPress={showImageUploadActions as any}
               iconType="MaterialIcons"
               name="edit"
               size={18}
             />
           </TouchableOpacity>
         </View>
-        {formData.map((item) => (
+        {formData.map((item: any) => (
           <View style={styles.formItem} key={item.valueKey}>
             <Text style={styles.label}>
               {intl.formatMessage({
@@ -102,7 +99,7 @@ const ProfileEditFormView = ({
               placeholder={item.placeholder}
               isEditable
               type="none"
-              value={props[item.valueKey]}
+              value={(props as any)[item.valueKey]}
               inputStyle={styles.input}
             />
           </View>

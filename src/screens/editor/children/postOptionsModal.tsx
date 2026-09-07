@@ -3,7 +3,12 @@ import { useIntl } from 'react-intl';
 import { Text, TouchableOpacity, View } from 'react-native';
 import Animated, { FlipInEasyX } from 'react-native-reanimated';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
-import { useDispatch, useSelector } from 'react-redux';
+import { useDispatch } from 'react-redux';
+import {
+  hasThreeSpeakEmbed,
+  THREESPEAK_BENEFICIARY_ACCOUNT,
+  THREESPEAK_BENEFICIARY_WEIGHT,
+} from '@ecency/sdk';
 import {
   BeneficiarySelectionContent,
   CheckBox,
@@ -15,10 +20,9 @@ import {
 import styles from './postOptionsModalStyles';
 import ThumbSelectionContent from './thumbSelectionContent';
 import PostDescription from './postDescription';
-import { useSpeakContentBuilder } from '../../../providers/queries/editorQueries/speakQueries';
-import { DEFAULT_SPEAK_BENEFICIARIES } from '../../../providers/speak/constants';
 import { Beneficiary } from '../../../redux/reducers/editorReducer';
 import { setDefaultRewardType } from '../../../redux/actions/editorActions';
+import { useAppSelector } from '../../../hooks';
 
 const REWARD_TYPES = [
   {
@@ -43,17 +47,20 @@ interface PostOptionsModalProps {
   body: string;
   draftId: string;
   thumbUrl: string;
+  videoThumbUrls?: string[];
   isEdit: boolean;
   isCommunityPost: boolean;
   rewardType: string;
   postDescription: string;
   isUploading: boolean;
+  canSaveTemplate: boolean;
   handleRewardChange: (rewardType: string) => void;
   handlePostDescriptionChange: (value: string) => void;
   handleThumbSelection: (url: string) => void;
   handleScheduleChange: (datetime: string | null) => void;
   handleShouldReblogChange: (shouldReblog: boolean) => void;
   handleFormUpdate: () => void;
+  handleSaveTemplatePress: () => void;
 }
 
 const PostOptionsModal = forwardRef(
@@ -62,24 +69,26 @@ const PostOptionsModal = forwardRef(
       body,
       draftId,
       thumbUrl,
+      videoThumbUrls,
       isEdit,
       isCommunityPost,
       rewardType,
       postDescription,
       isUploading,
+      canSaveTemplate,
       handleRewardChange,
       handleThumbSelection,
       handleScheduleChange,
       handleShouldReblogChange,
       handleFormUpdate,
       handlePostDescriptionChange,
+      handleSaveTemplatePress,
     }: PostOptionsModalProps,
     ref,
   ) => {
     const intl = useIntl();
     const dispatch = useDispatch();
-    const speakContentBuilder = useSpeakContentBuilder();
-    const defaultRewardType = useSelector((state) => state.editor.defaultRewardType);
+    const defaultRewardType = useAppSelector((state) => state.editor.defaultRewardType);
 
     const [showModal, setShowModal] = useState(false);
     const [rewardTypeIndex, setRewardTypeIndex] = useState(0);
@@ -89,25 +98,12 @@ const PostOptionsModal = forwardRef(
     const [disableDone, setDisableDone] = useState(false);
     const [isSaveDefaultChecked, setIsSaveDefaultChecked] = useState(false);
 
-    const { encodingBeneficiaries, videoThumbUrls } = useMemo(() => {
-      let benefs: Beneficiary[] = [];
-      if (body && showModal) {
-        speakContentBuilder.build(body);
-        const unpublishedMeta = speakContentBuilder.videoPublishMetaRef.current;
-        if (unpublishedMeta) {
-          const vidBeneficiaries = JSON.parse(unpublishedMeta.beneficiaries || '[]');
-          benefs = [...DEFAULT_SPEAK_BENEFICIARIES, ...vidBeneficiaries];
-        }
-
-        return {
-          videoThumbUrls: speakContentBuilder.thumbUrlsRef.current,
-          encodingBeneficiaries: benefs,
-        };
+    // If the post body contains a 3Speak embed URL, show the beneficiary
+    const embedBeneficiaries: Beneficiary[] = useMemo(() => {
+      if (body && showModal && hasThreeSpeakEmbed(body)) {
+        return [{ account: THREESPEAK_BENEFICIARY_ACCOUNT, weight: THREESPEAK_BENEFICIARY_WEIGHT }];
       }
-      return {
-        videoThumbUrls: [],
-        encodingBeneficiaries: benefs,
-      };
+      return [];
     }, [showModal, body]);
 
     // removed the useeffect causing index reset bug
@@ -170,6 +166,14 @@ const PostOptionsModal = forwardRef(
       handleThumbSelection(url);
     };
 
+    // close the options modal first; the parent then presents the template
+    // name prompt once this formSheet has dismissed
+    const _onSaveTemplatePress = () => {
+      setShowModal(false);
+      handleFormUpdate();
+      handleSaveTemplatePress();
+    };
+
     // handle save default reward checkbox here
     const _onCheckPress = () => {
       setIsSaveDefaultChecked(!isSaveDefaultChecked);
@@ -214,7 +218,7 @@ const PostOptionsModal = forwardRef(
                     intl.formatMessage({ id: 'editor.scheduled_later' }),
                   ]}
                   selectedOptionIndex={scheduleLater ? 1 : 0}
-                  handleOnChange={(index) => {
+                  handleOnChange={(index: any) => {
                     setScheduleLater(index === 1);
                     if (index !== 1) {
                       handleScheduleChange(null);
@@ -254,13 +258,26 @@ const PostOptionsModal = forwardRef(
                     handleOnChange={setShouldReblog}
                   />
                 )}
+                {canSaveTemplate && (
+                  <SettingsItem
+                    title={intl.formatMessage({
+                      id: 'templates.save_as_template',
+                    })}
+                    text={intl.formatMessage({
+                      id: 'beneficiary_modal.save',
+                    })}
+                    type="button"
+                    actionType="saveTemplate"
+                    handleOnButtonPress={_onSaveTemplatePress}
+                  />
+                )}
               </>
             )}
 
             <ThumbSelectionContent
               body={body}
               thumbUrl={thumbUrl}
-              videoThumbUrls={videoThumbUrls}
+              videoThumbUrls={videoThumbUrls || []}
               isUploading={isUploading}
               onThumbSelection={_handleThumbIndexSelection}
             />
@@ -273,7 +290,7 @@ const PostOptionsModal = forwardRef(
               <BeneficiarySelectionContent
                 draftId={draftId}
                 setDisableDone={setDisableDone}
-                encodingBeneficiaries={encodingBeneficiaries}
+                encodingBeneficiaries={embedBeneficiaries}
               />
             )}
           </View>

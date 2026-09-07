@@ -1,10 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useIntl } from 'react-intl';
 import { debounce } from 'lodash';
 import Animated, { FadeOut, LinearTransition, ZoomIn, ZoomOut } from 'react-native-reanimated';
+import { lookupAccountsQueryOptions } from '@ecency/sdk';
+import { useQueryClient } from '@tanstack/react-query';
 import styles from '../styles/hiveAuthModal.styles';
-import { lookupAccounts } from '../../../providers/hive/dhive';
 import { FormInput, MainButton } from '../..';
+import type {} from '../../formInput';
 import HIVE_AUTH_ICON from '../../../assets/HiveAuth_logo.png';
 
 interface AuthInputContentProps {
@@ -14,7 +16,9 @@ interface AuthInputContentProps {
 
 export const AuthInputContent = ({ initUsername, handleAuthRequest }: AuthInputContentProps) => {
   const intl = useIntl();
+  const queryClient = useQueryClient();
 
+  const usernameInputRef = useRef<any>(null);
   const [username, setUsername] = useState(initUsername || '');
   const [isUsernameValid, setIsUsernameValid] = useState(false);
 
@@ -35,12 +39,15 @@ export const AuthInputContent = ({ initUsername, handleAuthRequest }: AuthInputC
 
   const _handleUsernameChange = (username: string) => {
     const formattedUsername = username.trim().toLowerCase();
+    if (formattedUsername !== username) {
+      usernameInputRef.current?.setText(formattedUsername);
+    }
     setUsername(formattedUsername);
   };
 
   const _checkUsernameIsValid = async (uname: string) => {
     try {
-      const accts = await lookupAccounts(uname);
+      const accts = await queryClient.fetchQuery(lookupAccountsQueryOptions(uname));
       const isValid = accts.includes(uname);
       setIsUsernameValid(isValid);
     } catch (err) {
@@ -58,6 +65,7 @@ export const AuthInputContent = ({ initUsername, handleAuthRequest }: AuthInputC
     <Animated.View style={styles.authInputContent} exiting={FadeOut}>
       <Animated.View style={styles.authInputWrapper} layout={LinearTransition}>
         <FormInput
+          ref={usernameInputRef}
           rightIconName="at"
           leftIconName="close"
           iconType="MaterialCommunityIcons"

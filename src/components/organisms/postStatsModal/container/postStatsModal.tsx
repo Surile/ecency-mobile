@@ -6,6 +6,8 @@ import { PostStatsContent } from '../children';
 import styles from '../styles/postStatsModal.styles';
 import ROUTES from '../../../../constants/routeNames';
 import { useAppSelector } from '../../../../hooks';
+import { selectIsLoggedIn, selectIsPinCodeOpen } from '../../../../redux/selectors';
+import { getPostStatsDateRange } from '../../../../providers/queries';
 
 interface PostStatsModalProps {
   post: any;
@@ -14,12 +16,17 @@ interface PostStatsModalProps {
 export const PostStatsModal = forwardRef(({ post }: PostStatsModalProps, ref) => {
   const navigation = useNavigation();
 
-  const sheetModalRef = useRef<ActionSheet>();
+  const sheetModalRef = useRef<any>(null);
 
-  const isLoggedIn = useAppSelector((state) => state.application.isLoggedIn);
-  const isPinCodeOpen = useAppSelector((state) => state.application.isPinCodeOpen);
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
+  const isPinCodeOpen = useAppSelector(selectIsPinCodeOpen);
 
   const [urlPath, setUrlPath] = useState('');
+
+  // Scope stats to the post's lifetime so ClickHouse prunes by its time index
+  // instead of scanning all history. Computed per-render (not memoized on
+  // `created`) so the `to` bound stays current if the sheet lives across midnight.
+  const dateRange = getPostStatsDateRange(post?.created);
 
   useImperativeHandle(ref, () => ({
     show(_urlPath: string) {
@@ -35,9 +42,8 @@ export const PostStatsModal = forwardRef(({ post }: PostStatsModalProps, ref) =>
 
     const routeName = ROUTES.SCREENS.REDEEM;
     const params = {
-      from: 1,
       permlink: `${post.author}/${post.permlink}`,
-      redeemType: 'promote',
+      redeemType: 'promote' as const,
     };
 
     sheetModalRef.current?.hide();
@@ -60,9 +66,9 @@ export const PostStatsModal = forwardRef(({ post }: PostStatsModalProps, ref) =>
       ref={sheetModalRef}
       gestureEnabled={true}
       containerStyle={styles.sheetContent}
-      indicatorColor={EStyleSheet.value('$primaryWhiteLightBackground')}
+      {...({ indicatorColor: EStyleSheet.value('$primaryWhiteLightBackground') } as any)}
     >
-      <PostStatsContent urlPath={urlPath} onPromotePress={_onPromotePress} />
+      <PostStatsContent urlPath={urlPath} dateRange={dateRange} onPromotePress={_onPromotePress} />
     </ActionSheet>
   );
 });

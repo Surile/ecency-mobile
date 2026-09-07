@@ -38,6 +38,9 @@ const BasicHeaderView = ({
   quickTitle,
   rightButtonText,
   rightIconName,
+  // Icon-only, so it is unnamed to a screen reader without this. Optional, since the
+  // header's other call sites are unchanged.
+  rightIconAccessibilityLabel,
   isHasBrowserIcon,
   iconType,
   rightIconBtnStyle,
@@ -50,7 +53,7 @@ const BasicHeaderView = ({
   handleSettingsPress,
   backIconName,
   isLoadingRightIcon,
-}) => {
+}: any) => {
   const [isInputVisible, setIsInputVisible] = useState(false);
   const rewardMenuRef = useRef(null);
 
@@ -78,11 +81,11 @@ const BasicHeaderView = ({
     }
   };
 
-  const _handleOnSearch = (value) => {
+  const _handleOnSearch = (value: any) => {
     handleOnSearch(value);
   };
 
-  const _handleRewardMenuSelect = (index) => {
+  const _handleRewardMenuSelect = (index: any) => {
     let rewardType = 'default';
 
     switch (index) {
@@ -108,7 +111,7 @@ const BasicHeaderView = ({
    */
 
   return (
-    <View style={styles.safeArea}>
+    <View style={styles.headerBackground}>
       <View style={styles.container}>
         <View style={styles.backWrapper}>
           <IconButton
@@ -143,6 +146,7 @@ const BasicHeaderView = ({
               name={rightIconName}
               iconType={iconType}
               isLoading={isLoadingRightIcon}
+              accessibilityLabel={rightIconAccessibilityLabel}
             />
           )}
 

@@ -3,12 +3,13 @@ import { View, TextInput, Text } from 'react-native';
 import styles from '../styles/swapAmountInput.styles';
 import { useAppSelector } from '../../../hooks';
 import { formatNumberInputStr } from '../../../utils/number';
+import { selectCurrency } from '../../../redux/selectors';
 
 interface SwapInputProps {
   label: string;
   onChangeText?: (text: string) => void;
   value: string;
-  fiatPrice: number;
+  fiatRate: number;
   symbol: string;
 }
 
@@ -17,12 +18,12 @@ export const SwapAmountInput = ({
   label,
   onChangeText,
   value,
-  fiatPrice,
+  fiatRate,
   symbol,
 }: SwapInputProps) => {
-  const currency = useAppSelector((state) => state.application.currency);
+  const currency = useAppSelector(selectCurrency);
 
-  const _fiatValue = ((Number(value) || 0) * fiatPrice).toFixed(3);
+  const _fiatValue = ((Number(value) || 0) * fiatRate).toFixed(3);
 
   const _onChangeText = (text: string) => {
     if (onChangeText) {

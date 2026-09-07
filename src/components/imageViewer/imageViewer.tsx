@@ -1,14 +1,16 @@
 import React, { forwardRef, useImperativeHandle, useState } from 'react';
-import { View, Text, Platform, SafeAreaView, Share, Alert } from 'react-native';
+import { View, Text, Platform, Share, Alert, PermissionsAndroid } from 'react-native';
 import EStyleSheet from 'react-native-extended-stylesheet';
 import ImageViewing from 'react-native-image-viewing';
 import { useIntl } from 'react-intl';
-import { PermissionsAndroid } from 'react-native';
 import { CameraRoll } from '@react-native-camera-roll/camera-roll';
 import { Image as ExpoImage } from 'expo-image';
 import RNFetchBlob from 'rn-fetch-blob';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import IconButton from '../iconButton';
 import styles from './imageViewer.styles';
+import { shouldPrefetchImages } from '../../utils/image';
+import { isImageRevealed } from '../../utils/revealedImages';
 
 // eslint-disable-next-line no-empty-pattern
 export const ImageViewer = forwardRef(({}, ref) => {
@@ -20,15 +22,24 @@ export const ImageViewer = forwardRef(({}, ref) => {
   const [visible, setVisible] = useState(false);
   const [imageUrls, setImageUrls] = useState<string[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const insets = useSafeAreaInsets();
 
   useImperativeHandle(ref, () => ({
     show(selectedUrl: string, _imageUrls: string[]) {
-      setImageUrls(_imageUrls);
-      setSelectedIndex(_imageUrls.indexOf(selectedUrl));
+      // The viewer is a swipeable gallery, so it mounts (and therefore fetches)
+      // the neighbours of whatever is on screen. With "Show Images" off, limit it
+      // to the images the user has actually loaded; swiping then moves between
+      // those rather than pulling in the rest of the post behind one tap.
+      const _urls = shouldPrefetchImages()
+        ? _imageUrls
+        : _imageUrls.filter((url) => url === selectedUrl || isImageRevealed(url));
+
+      setImageUrls(_urls);
+      setSelectedIndex(_urls.indexOf(selectedUrl));
       setVisible(true);
 
       if (Platform.OS === 'ios') {
-        ExpoImage.prefetch(_imageUrls, 'memory');
+        ExpoImage.prefetch(_urls, 'memory');
       }
     },
   }));
@@ -43,24 +54,46 @@ export const ImageViewer = forwardRef(({}, ref) => {
     }
   };
 
-  const _downloadImage = async (uri: string) => {
-    return RNFetchBlob.config({
-      fileCache: true,
-      appendExt: 'jpg',
-    })
-      .fetch('GET', uri)
-      .then((res) => {
-        const { status } = res.info();
+  const _getImageExt = (url: string, contentType?: string): string => {
+    // Try content-type header first (most reliable source of truth)
+    if (contentType) {
+      const type = contentType.split(';')[0].trim().toLowerCase();
+      const match = type.match(/^image\/(\w+)/);
+      if (match) {
+        const sub = match[1];
+        if (sub === 'jpeg') return 'jpg';
+        if (sub === 'svg+xml') return 'svg';
+        return sub;
+      }
+    }
 
-        if (status == 200) {
-          return res.path();
-        } else {
-          Promise.reject();
-        }
-      })
-      .catch((errorMessage) => {
-        Promise.reject(errorMessage);
-      });
+    // Fallback: extract extension from URL path
+    try {
+      const pathMatch = new URL(url).pathname.match(/\.([a-z0-9]+)$/i);
+      if (pathMatch) return pathMatch[1].toLowerCase().replace('jpeg', 'jpg');
+    } catch (_e) {
+      /* ignore */
+    }
+
+    return 'jpg';
+  };
+
+  const _downloadImage = async (uri: string) => {
+    const res = await RNFetchBlob.config({
+      fileCache: true,
+    }).fetch('GET', uri);
+
+    const { status, headers } = res.info();
+    if (status !== 200) {
+      throw new Error(`Download failed with status ${status}`);
+    }
+
+    const contentType = headers['Content-Type'] || headers['content-type'] || '';
+    const ext = _getImageExt(uri, contentType);
+    const srcPath = res.path();
+    const destPath = `${srcPath}.${ext}`;
+    await RNFetchBlob.fs.mv(srcPath, destPath);
+    return destPath;
   };
 
   const _onSavePress = async (index: number) => {
@@ -70,11 +103,7 @@ export const ImageViewer = forwardRef(({}, ref) => {
       }
 
       const url = imageUrls[index];
-
-      const imagePath = Platform.select({
-        ios: await ExpoImage.getCachePathAsync(url),
-        android: await _downloadImage(url),
-      });
+      const imagePath = await _downloadImage(url);
 
       if (!imagePath) {
         return;
@@ -84,8 +113,9 @@ export const ImageViewer = forwardRef(({}, ref) => {
       await CameraRoll.saveAsset(uri, { album: 'Ecency' });
 
       Alert.alert(intl.formatMessage({ id: 'post.image_saved' }));
-    } catch (err) {
-      console.warn('fail to save image', err.message);
+    } catch (err: any) {
+      console.warn('fail to save image', err?.message);
+      Alert.alert(intl.formatMessage({ id: 'alert.fail' }), err?.message);
     }
   };
 
@@ -107,9 +137,9 @@ export const ImageViewer = forwardRef(({}, ref) => {
 
   const _renderImageViewerHeader = (imageIndex: number) => {
     return (
-      <SafeAreaView
+      <View
         style={{
-          marginTop: Platform.select({ ios: 0, android: 25 }),
+          marginTop: Platform.select({ ios: insets.top, android: 16 }),
         }}
       >
         <View style={styles.imageViewerHeaderContainer}>
@@ -125,7 +155,7 @@ export const ImageViewer = forwardRef(({}, ref) => {
             {_renderIconButton('download', () => _onSavePress(imageIndex))}
           </View>
         </View>
-      </SafeAreaView>
+      </View>
     );
   };
 
@@ -135,14 +165,18 @@ export const ImageViewer = forwardRef(({}, ref) => {
   };
 
   return (
+    // <SafeAreaView>
     <ImageViewing
       images={imageUrls.map((url) => ({ uri: url }))}
       imageIndex={selectedIndex}
       visible={visible}
+      presentationStyle="overFullScreen"
       animationType="slide"
       swipeToCloseEnabled
+      doubleTapScale={1.5}
       onRequestClose={_onCloseImageViewer}
       HeaderComponent={(data) => _renderImageViewerHeader(data.imageIndex)}
     />
+    // </SafeAreaView>
   );
 });

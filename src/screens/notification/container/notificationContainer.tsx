@@ -1,6 +1,4 @@
-/* eslint-disable react/no-unused-state */
 import React, { useRef, useState } from 'react';
-import { useDispatch } from 'react-redux';
 import get from 'lodash/get';
 
 // Actions and Services
@@ -9,69 +7,87 @@ import { useQueryClient } from '@tanstack/react-query';
 
 // Constants
 import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
+import { SheetManager } from 'react-native-actions-sheet';
 import ROUTES from '../../../constants/routeNames';
 
 // Components
 import NotificationScreen from '../screen/notificationScreen';
-import { showProfileModal } from '../../../redux/actions/uiAction';
 import { useAppSelector } from '../../../hooks';
 import { useNotificationReadMutation, useNotificationsQuery } from '../../../providers/queries';
 import { NotificationFilters } from '../../../providers/ecency/ecency.types';
 import QUERIES from '../../../providers/queries/queryKeys';
+import { SheetNames } from '../../../navigation/sheets';
+import {
+  selectCurrentAccount,
+  selectIsLoggedIn,
+  selectGlobalProps,
+  selectIsConnected,
+} from '../../../redux/selectors';
 
-const NotificationContainer = ({ navigation }) => {
-  const dispatch = useDispatch();
+const NotificationContainer = ({ navigation }: any) => {
   const queryClient = useQueryClient();
 
-  const isLoggedIn = useAppSelector((state) => state.application.isLoggedIn);
-  const isConnected = useAppSelector((state) => state.application.isConnected);
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const globalProps = useAppSelector((state) => state.account.globalProps);
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
+  const isConnected = useAppSelector(selectIsConnected);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const globalProps = useAppSelector(selectGlobalProps);
 
   const unreadCountRef = useRef(currentAccount.unread_acitivity_count || 0);
-  const curUsername = useRef(currentAccount.username);
+  const curUsername = useRef(currentAccount.name);
 
   const notificationReadMutation = useNotificationReadMutation();
-  const allNotificationsQuery = useNotificationsQuery(NotificationFilters.ACTIVITIES);
-  const repliesNotificationsQuery = useNotificationsQuery(NotificationFilters.REPLIES);
-  const mentiosnNotificationsQuery = useNotificationsQuery(NotificationFilters.MENTIONS);
 
   const [selectedFilter, setSelectedFilter] = useState(NotificationFilters.ACTIVITIES);
 
-  const selectedQuery =
-    selectedFilter === NotificationFilters.REPLIES
-      ? repliesNotificationsQuery
-      : selectedFilter === NotificationFilters.MENTIONS
-      ? mentiosnNotificationsQuery
-      : allNotificationsQuery;
+  // Only fetch the active filter - convert ACTIVITIES to undefined for "all"
+  const activeFilter =
+    selectedFilter === NotificationFilters.ACTIVITIES ? undefined : selectedFilter;
+  const selectedQuery = useNotificationsQuery(activeFilter);
 
   useEffect(() => {
-    if (curUsername.current !== currentAccount.username) {
-      queryClient.removeQueries([QUERIES.NOTIFICATIONS.GET]);
+    if (curUsername.current !== currentAccount.name) {
+      queryClient.removeQueries({ queryKey: [QUERIES.NOTIFICATIONS.GET] });
       selectedQuery.refresh();
-      curUsername.current = currentAccount.useranme;
+      curUsername.current = currentAccount.name;
     }
-  }, [currentAccount.username]);
+  }, [currentAccount.name]);
 
   useEffect(() => {
     if (currentAccount.unread_activity_count > unreadCountRef.current) {
-      queryClient.invalidateQueries([QUERIES.NOTIFICATIONS.GET]);
+      queryClient.invalidateQueries({ queryKey: [QUERIES.NOTIFICATIONS.GET] });
       // TODO: fetch new notifications instead
     }
     unreadCountRef.current = currentAccount.unread_activity_count;
   }, [currentAccount.unread_activity_count]);
 
+  // Refetch when filter changes — the single dynamic query hook doesn't auto-fetch
+  // for new filter keys since the component doesn't remount on filter change
+  const prevFilterRef = useRef(selectedFilter);
+  useEffect(() => {
+    if (prevFilterRef.current !== selectedFilter) {
+      prevFilterRef.current = selectedFilter;
+      selectedQuery.refresh();
+    }
+  }, [selectedFilter]);
+
+  // Refetch when filter changes — the dynamic query key means React Query
+  // may not auto-fetch for a new filter if the observer is reused
+  useEffect(() => {
+    selectedQuery.refresh();
+  }, [activeFilter]);
+
   const _getActivities = (loadMore = false) => {
     if (loadMore) {
-      console.log('load more notifications');
-      selectedQuery.fetchNextPage();
+      // Only fetch next page if not already fetching and has more pages
+      if (!selectedQuery.isFetchingNextPage && selectedQuery.hasNextPage) {
+        selectedQuery.fetchNextPage();
+      }
     } else {
-      console.log('refreshing');
       selectedQuery.refresh();
     }
   };
 
-  const _navigateToNotificationRoute = (data) => {
+  const _navigateToNotificationRoute = (data: any) => {
     const type = get(data, 'type');
     const permlink = get(data, 'permlink');
     const author = get(data, 'author');
@@ -89,13 +105,43 @@ const NotificationContainer = ({ navigation }) => {
         author,
         permlink,
       };
-    } else if (type === 'follow') {
+    } else if (type === 'scheduled_published' && permlink) {
+      // source is the author of the published scheduled post
+      routeName = ROUTES.SCREENS.POST;
+      key = permlink;
+      params = {
+        author: get(data, 'source'),
+        permlink,
+      };
+    } else if (
+      type === 'follow' ||
+      type === 'unfollow' ||
+      type === 'ignore' ||
+      type === 'blacklist'
+    ) {
+      // The whole follow family is serialized with follower/following and shares
+      // ACTIVITY_MAIN_TYPE_FOLLOW. Routing only 'follow' left the other three
+      // untappable, and disagreed with the push router in useInitApplication.
       routeName = ROUTES.SCREENS.PROFILE;
       key = get(data, 'follower');
       params = {
         username: get(data, 'follower'),
       };
-    } else if (type === 'transfer') {
+    } else if (type === 'tags' && permlink) {
+      // A single post carries author and permlink and took the first branch above;
+      // this is the same post should a row ever arrive with the author only in source.
+      routeName = ROUTES.SCREENS.POST;
+      key = permlink;
+      params = {
+        author: get(data, 'source'),
+        permlink,
+      };
+    } else if (type === 'tags' && /^[a-z0-9-]{1,32}$/.test(get(data, 'tag', ''))) {
+      // A bundle row (busy tag, one row an hour) has no post behind it.
+      routeName = ROUTES.SCREENS.TAG_RESULT;
+      key = get(data, 'tag');
+      params = { tag: get(data, 'tag') };
+    } else if (type === 'transfer' || type === 'weekly_earnings') {
       routeName = ROUTES.TABBAR.WALLET;
     } else if (type === 'spin') {
       routeName = ROUTES.SCREENS.BOOST;
@@ -112,8 +158,12 @@ const NotificationContainer = ({ navigation }) => {
     }
   };
 
-  const _handleOnUserPress = (username) => {
-    dispatch(showProfileModal(username));
+  const _handleOnUserPress = (username: any) => {
+    SheetManager.show(SheetNames.QUICK_PROFILE, {
+      payload: {
+        username,
+      },
+    });
   };
 
   // TODO: handle mark as read mutations
@@ -142,10 +192,12 @@ const NotificationContainer = ({ navigation }) => {
       isLoggedIn={isLoggedIn}
       changeSelectedFilter={setSelectedFilter}
       globalProps={globalProps}
-      isLoading={selectedQuery.isLoading}
+      isLoading={selectedQuery.isLoading || selectedQuery.isPending}
+      isFetching={selectedQuery.isFetching}
+      isError={selectedQuery.isError}
+      error={selectedQuery.error}
     />
   );
 };
 
 export default gestureHandlerRootHOC(NotificationContainer);
-/* eslint-enable */

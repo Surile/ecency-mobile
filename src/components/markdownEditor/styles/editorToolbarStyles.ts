@@ -1,6 +1,5 @@
 import { Platform, ViewStyle } from 'react-native';
 import EStyleSheet from 'react-native-extended-stylesheet';
-import { getBottomSpace } from 'react-native-iphone-x-helper';
 
 const _dropShadow = {
   shadowOpacity: 0.1,
@@ -36,7 +35,6 @@ export default EStyleSheet.create({
     width: '100%',
     backgroundColor: '$primaryBackgroundColor',
     borderColor: '$primaryLightBackground',
-    paddingBottom: getBottomSpace(),
   },
   iconBottomBar: {
     borderBottomWidth: 3,
@@ -55,11 +53,10 @@ export default EStyleSheet.create({
     height: 24,
   },
   leftButtonsWrapper: {
-    marginLeft: 16,
+    paddingLeft: 16,
+    paddingRight: 8,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    flexGrow: 1,
   } as ViewStyle,
   rightButtonsWrapper: {
     flexDirection: 'row',
@@ -88,4 +85,77 @@ export default EStyleSheet.create({
     paddingBottom: 16,
     paddingHorizontal: 16,
   } as ViewStyle,
+  aiBadge: {
+    position: 'absolute',
+    right: -8,
+    top: -4,
+    backgroundColor: '$primaryBlue',
+    borderRadius: 3,
+    paddingHorizontal: 2,
+    paddingVertical: 0,
+    zIndex: 99,
+    minWidth: 0,
+    height: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  aiBadgeText: {
+    color: '$white',
+    fontSize: 7,
+    fontWeight: '800',
+    lineHeight: 10,
+  },
+  clipboardChipWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    marginHorizontal: 12,
+    marginTop: 6,
+    marginBottom: 4,
+    paddingLeft: 12,
+    paddingRight: 4,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '$primaryLightBackground',
+  } as ViewStyle,
+  clipboardChip: {
+    flexShrink: 1,
+  } as ViewStyle,
+  clipboardChipClose: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  } as ViewStyle,
+  clipboardChipText: {
+    color: '$primaryDarkText',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  questChipWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    marginHorizontal: 12,
+    marginTop: 6,
+    marginBottom: 4,
+    paddingLeft: 12,
+    paddingRight: 4,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '$primaryLightBackground',
+  } as ViewStyle,
+  questChip: {
+    flexShrink: 1,
+  } as ViewStyle,
+  questChipClose: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  } as ViewStyle,
+  questChipText: {
+    color: '$primaryDarkText',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  questChipTextAtRisk: {
+    color: '#f97316',
+  },
 });

@@ -1,11 +1,19 @@
-import React, { useState } from 'react';
+import React, { useDeferredValue, useState } from 'react';
 import { TabView, TabBarProps } from 'react-native-tab-view';
 import { useWindowDimensions, View } from 'react-native';
 import { useIntl } from 'react-intl';
+import { Image } from 'expo-image';
+import EStyleSheet from 'react-native-extended-stylesheet';
 import { TabbedPostsProps } from '../types/tabbedPosts.types';
 import { FeedTabBar } from '../view/feedTabBar';
 import PostsTabContent from '../view/postsTabContent';
-import { Tag } from '../..';
+import { renderPillTabLabel } from '../view/renderPillTabLabel';
+
+const styles = EStyleSheet.create({
+  container: {
+    flex: 1,
+  },
+});
 
 export const TabbedPosts = ({
   tabFilters,
@@ -17,6 +25,8 @@ export const TabbedPosts = ({
   ...props
 }: TabbedPostsProps) => {
   const layout = useWindowDimensions();
+  const layoutWidth = Math.round(layout.width);
+  const deferredLayoutWidth = useDeferredValue(layoutWidth);
   const intl = useIntl();
 
   // initialize state
@@ -49,22 +59,22 @@ export const TabbedPosts = ({
     );
   };
 
-  const _renderTabLabel = ({ labelText, focused }: { focused: boolean; labelText: string }) => (
-    <Tag
-      key={labelText}
-      value={intl.formatMessage({ id: labelText.toLowerCase() }).toUpperCase()}
-      isFilter
-      isPin={focused}
-    />
-  );
+  const _renderTabLabel = ({ labelText, focused }: { focused: boolean; labelText: string }) =>
+    renderPillTabLabel({ labelText: intl.formatMessage({ id: labelText.toLowerCase() }), focused });
+
+  const _setIndex = (i: number) => {
+    Image.clearMemoryCache();
+    setIndex(i);
+  };
 
   // Dynamically create scenes for each tab
-  const renderScene = ({ route }) => {
+  const renderScene = ({ route }: any) => {
     if (tabContentOverrides && tabContentOverrides.has(index)) {
       return tabContentOverrides.get(index);
     }
     return (
       <PostsTabContent
+        {...({} as any)}
         key={route.key}
         filterKey={route.key}
         isFeedScreen={isFeedScreen}
@@ -79,19 +89,20 @@ export const TabbedPosts = ({
   };
 
   return (
-    <View style={{ flex: 1, width: layout.width }}>
+    <View style={[styles.container, { width: layoutWidth }]}>
       <TabView
+        key={`tab-view-${deferredLayoutWidth}`}
         animationEnabled={false}
         lazy={true}
         swipeEnabled={false}
         renderTabBar={_renderTabBar}
         navigationState={{ index, routes }}
         renderScene={renderScene}
-        onIndexChange={setIndex}
+        onIndexChange={_setIndex}
         commonOptions={{
-          label: _renderTabLabel,
+          label: _renderTabLabel as any,
         }}
-        initialLayout={{ width: layout.width }}
+        initialLayout={{ width: deferredLayoutWidth }}
       />
     </View>
   );

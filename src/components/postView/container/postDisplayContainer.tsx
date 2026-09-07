@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import get from 'lodash/get';
 
 // Action
@@ -10,6 +10,7 @@ import { default as ROUTES } from '../../../constants/routeNames';
 // Component
 import PostDisplayView from '../view/postDisplayView';
 import { useAppSelector } from '../../../hooks';
+import { selectCurrentAccount, selectIsLoggedIn } from '../../../redux/selectors';
 
 const PostDisplayContainer = ({
   post,
@@ -22,70 +23,73 @@ const PostDisplayContainer = ({
   isWavePost,
   author,
   permlink,
-}) => {
+}: any) => {
   const navigation = useNavigation();
 
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const isLoggedIn = useAppSelector((state) => state.application.isLoggedIn);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
 
   const [activeVotes, setActiveVotes] = useState([]);
   const [activeVotesCount, setActiveVotesCount] = useState(0);
 
   useEffect(() => {
     if (post) {
-      console.log('Gettting reblogs inside postDisplayContainer');
       const votes = get(post, 'active_votes', []);
       const activeVotesCount = get(post, 'stats.total_votes', 0);
-      setActiveVotes(votes);
-      setActiveVotesCount(activeVotesCount);
+      setActiveVotes((prevVotes) => (prevVotes !== votes ? votes : prevVotes));
+      setActiveVotesCount((prevCount) =>
+        prevCount !== activeVotesCount ? activeVotesCount : prevCount,
+      );
     }
   }, [post]);
 
-  useEffect(() => {
-    _fetchPost();
-  }, [isFetchPost, isFetchComments]);
-
   // Component Functions
-  const _handleOnVotersPress = () => {
+  const _fetchPost = useCallback(async () => {
+    const targetAuthor = author || post?.author;
+    const targetPermlink = permlink || post?.permlink;
+    if (targetAuthor && targetPermlink) {
+      fetchPost(targetAuthor, targetPermlink);
+    }
+  }, [author, permlink, post?.author, post?.permlink, fetchPost]);
+
+  useEffect(() => {
+    if (isFetchPost || isFetchComments) {
+      _fetchPost();
+    }
+  }, [isFetchPost, isFetchComments, _fetchPost]);
+
+  const _handleOnVotersPress = useCallback(() => {
     navigation.navigate({
       name: ROUTES.SCREENS.VOTERS,
       params: {
-        activeVotes,
         content: post,
       },
       // TODO: make unic
-      key: post.permlink + activeVotes.length,
-    } as never);
-  };
+      key: post?.permlink + activeVotes.length,
+    });
+  }, [navigation, activeVotes, post]);
 
-  const _handleOnReblogsPress = () => {
+  const _handleOnReblogsPress = useCallback(() => {
     navigation.navigate({
       name: ROUTES.SCREENS.REBLOGS,
       params: {
         author,
         permlink,
       },
-      key: post.permlink + post.reblogs.length,
-    } as never);
-  };
+      key: `${post?.permlink}-reblogs-${post?.reblogs ?? 0}`,
+    });
+  }, [navigation, author, permlink, post?.permlink, post?.reblogs]);
 
-  const _handleOnReplyPress = () => {
+  const _handleOnReplyPress = useCallback(() => {
     navigation.navigate({
       name: ROUTES.SCREENS.EDITOR,
       key: 'editor_replay',
       params: {
         isReply: true,
         post,
-        fetchPost: _fetchPost,
       },
-    } as never);
-  };
-
-  const _fetchPost = async () => {
-    if (post) {
-      fetchPost(post.author, post.permlink);
-    }
-  };
+    });
+  }, [navigation, post]);
 
   return (
     <PostDisplayView
@@ -97,7 +101,6 @@ const PostDisplayContainer = ({
       isNewPost={isNewPost}
       parentPost={parentPost}
       post={post}
-      activeVotes={activeVotes}
       activeVotesCount={activeVotesCount}
       isWavePost={isWavePost}
       fetchPost={_fetchPost}

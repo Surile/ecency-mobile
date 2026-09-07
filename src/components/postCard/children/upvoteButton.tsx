@@ -1,14 +1,12 @@
-import React, { Ref, useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, Ref } from 'react';
 import { Text, TouchableOpacity, View } from 'react-native';
-import { useAppSelector } from '../../../hooks';
-import { isDownVoted as isDownVotedFunc, isVoted as isVotedFunc } from '../../../utils/postParser';
+import { useIntl } from 'react-intl';
 import { FormattedCurrency } from '../../formatedElements';
 import Icon from '../../icon';
-import styles from './children.styles';
+import styles from '../styles/children.styles';
 
 interface UpvoteButtonProps {
   content: any;
-  activeVotes: any[];
   isShowPayoutValue?: boolean;
   boldPayout?: boolean;
   onUpvotePress: (sourceRef: Ref<any>, onVotingStart: (status: number) => void) => void;
@@ -17,48 +15,43 @@ interface UpvoteButtonProps {
 
 export const UpvoteButton = ({
   content,
-  activeVotes,
   isShowPayoutValue,
   boldPayout,
   onUpvotePress,
   onPayoutDetailsPress,
 }: UpvoteButtonProps) => {
-  const upvoteRef = useRef(null);
-  const detailsRef = useRef(null);
+  const intl = useIntl();
+  const upvoteRef = useRef<any>(null);
+  const detailsRef = useRef<any>(null);
 
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
+  const [isVoted, setIsVoted] = useState(!!content.isUpVoted);
+  const [isDownVoted, setIsDownVoted] = useState(!!content.isDownVoted);
 
-  const [isVoted, setIsVoted] = useState<any>(null);
-  const [isDownVoted, setIsDownVoted] = useState<any>(null);
-
+  // update voted state if vote status changes
   useEffect(() => {
-    _calculateVoteStatus();
-  }, [activeVotes]);
-
-  const _calculateVoteStatus = useCallback(async () => {
-    // TODO: do this heavy lifting during parsing or react-query/cache response
-    const _isVoted = await isVotedFunc(activeVotes, currentAccount?.name);
-    const _isDownVoted = await isDownVotedFunc(activeVotes, currentAccount?.name);
-
-    setIsVoted(_isVoted && parseInt(_isVoted, 10) / 10000);
-    setIsDownVoted(_isDownVoted && (parseInt(_isDownVoted, 10) / 10000) * -1);
-  }, [activeVotes]);
+    const upVoted = !!content.isUpVoted;
+    const downVoted = !!content.isDownVoted;
+    if (upVoted !== isVoted) {
+      setIsVoted(upVoted);
+    }
+    if (downVoted !== isDownVoted) {
+      setIsDownVoted(downVoted);
+    }
+  }, [content.isUpVoted, content.isDownVoted]);
 
   const _onPress = () => {
-    const _onVotingStart = (status) => {
+    const _onVotingStart = (status: any) => {
       if (status > 0) {
         setIsVoted(true);
       } else if (status < 0) {
         setIsDownVoted(true);
       } else {
-        _calculateVoteStatus();
+        setIsVoted(false);
+        setIsDownVoted(false);
       }
     };
 
     onUpvotePress(upvoteRef, _onVotingStart);
-    // _getRectFromRef(upvoteRef, (rect) => {
-    //   onUpvotePress(rect, _onVotingStart);
-    // });
   };
 
   const _onDetailsPress = () => {
@@ -71,6 +64,14 @@ export const UpvoteButton = ({
 
   const payoutLimitHit = totalPayout >= maxPayout;
   const _shownPayout = payoutLimitHit && maxPayout > 0 ? maxPayout : totalPayout;
+  // Always render the payout value to match the web client (entry-payout always shows
+  // the amount, including $0.000, on posts, comments and waves alike). Coerce an
+  // absent/NaN payout to 0 so FormattedCurrency never receives undefined (which would
+  // render "$ NaN"). When an entry genuinely earns nothing the real value is 0.000, so
+  // we no longer hide the chip — that mirrors the website and avoids dropping real
+  // payouts on entries whose total only looks zero (see parsePost numeric-payout
+  // fallback for search/RPC-shaped entries).
+  const _payoutValue = Number(_shownPayout) || 0;
 
   let iconName = 'upcircleo';
   const iconType = 'AntDesign';
@@ -84,36 +85,47 @@ export const UpvoteButton = ({
     downVoteIconName = 'downcircle';
   }
 
+  // Give the vote control a screen-reader name + state. The icon alone carries no
+  // accessible label, so VoiceOver/TalkBack users couldn't find or operate it.
+  const voteAccessibilityLabel = isVoted
+    ? intl.formatMessage({ id: 'post.upvoted', defaultMessage: 'Upvoted' })
+    : isDownVoted
+    ? intl.formatMessage({ id: 'post.downvoted', defaultMessage: 'Downvoted' })
+    : intl.formatMessage({ id: 'post.upvote', defaultMessage: 'Upvote' });
+
   return (
     <View style={styles.container}>
-      <TouchableOpacity ref={upvoteRef} onPress={_onPress} style={styles.upvoteButton}>
-        {/* <Fragment>
-                    {isVoting ? (
-                        <View style={{ width: 19 }}>
-                            <PulseAnimation
-                                color="#357ce6"
-                                numPulses={1}
-                                diameter={20}
-                                speed={100}
-                                duration={1500}
-                                isShow={!isVoting}
-                            />
-                        </View>
-                    ) : ( */}
+      <TouchableOpacity
+        ref={upvoteRef}
+        onPress={_onPress}
+        style={styles.upvoteButton}
+        accessibilityRole="button"
+        accessibilityLabel={voteAccessibilityLabel}
+        accessibilityHint={intl.formatMessage({
+          id: 'post.upvote_hint',
+          defaultMessage: 'Double tap to open vote options',
+        })}
+        accessibilityState={{ selected: isVoted || isDownVoted }}
+      >
         <View hitSlop={{ top: 10, bottom: 10, left: 10, right: 5 }}>
           <Icon
             style={[styles.upvoteIcon, isDownVoted && { color: '#ec8b88' }]}
-            active={!currentAccount}
             iconType={iconType}
             name={isDownVoted ? downVoteIconName : iconName}
           />
         </View>
-        {/* )}
-                </Fragment> */}
       </TouchableOpacity>
       <View style={styles.payoutTextButton}>
         {isShowPayoutValue && (
-          <TouchableOpacity ref={detailsRef} onPress={_onDetailsPress}>
+          <TouchableOpacity
+            ref={detailsRef}
+            onPress={_onDetailsPress}
+            accessibilityRole="button"
+            accessibilityHint={intl.formatMessage({
+              id: 'post.payout_details',
+              defaultMessage: 'Payout details',
+            })}
+          >
             <Text
               style={[
                 styles.payoutValue,
@@ -121,7 +133,7 @@ export const UpvoteButton = ({
                 boldPayout && styles.boldText,
               ]}
             >
-              <FormattedCurrency value={_shownPayout || '0.000'} />
+              <FormattedCurrency value={_payoutValue} />
             </Text>
           </TouchableOpacity>
         )}

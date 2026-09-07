@@ -1,14 +1,22 @@
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { InfiniteData, useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { unionBy, isArray } from 'lodash';
-import BackgroundTimer from 'react-native-background-timer';
 import { AppState, NativeEventSubscription } from 'react-native';
+import {
+  getPostsRankedInfiniteQueryOptions,
+  getAccountPostsInfiniteQueryOptions,
+  getPromotedPostsQuery,
+  useDeleteComment,
+} from '@ecency/sdk';
+import { useIntl } from 'react-intl';
 import QUERIES from '../queryKeys';
-import { useAppSelector } from '../../../hooks';
-import { getAccountPosts, getRankedPosts } from '../../hive/dhive';
-import { getPromotedEntries } from '../../ecency/ecency';
+import { useAppDispatch, useAppSelector } from '../../../hooks';
+import { toastNotification } from '../../../redux/actions/uiAction';
+import { useAuthContext } from '../../sdk';
 import filterNsfwPost from '../../../utils/filterNsfwPost';
 import { useGetPostQuery } from './postQueries';
+import { selectNsfw, selectCurrentAccount } from '../../../redux/selectors';
+import { parsePost } from '../../../utils/postParser';
 
 const POSTS_FETCH_COUNT = 10;
 
@@ -21,27 +29,50 @@ interface FeedQueryParams {
   pinnedPermlink?: string;
 }
 
+/**
+ * `author/permlink` of posts deleted during this app session.
+ *
+ * Module level rather than component state on purpose. The delete broadcasts
+ * async, so hivemind has not indexed it yet and any query refetching in that
+ * window returns the post again. Component state is lost when the screen
+ * unmounts, so leaving a profile and returning was enough to bring a deleted
+ * post back. Keeping it here suppresses the row whatever any cache holds,
+ * without forcing a fetch that would lose the race anyway.
+ */
+const deletedPostKeys = new Set<string>();
+
 export const useFeedQuery = ({
   feedUsername,
   filterKey,
   tag,
-  cachePage,
+  cachePage: _cachePage, // No longer used with SDK query keys
   enableFetchOnAppState,
   pinnedPermlink,
 }: FeedQueryParams) => {
-  const postFetchTimerRef = useRef(null);
   const appState = useRef(AppState.currentState);
-  const appStateSubRef = useRef<NativeEventSubscription | null>();
+  const appStateSubRef = useRef<NativeEventSubscription | null>(null);
 
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [pageKeys, setPageKeys] = useState(['']);
-  const [latestPosts, setLatestPosts] = useState([]);
+  // Bumped when a delete lands, to re-run the memo below against the module set
+  // above. It is applied to the assembled list rather than only the feed cache,
+  // because the list is assembled from more than that cache and the cache holds
+  // *raw* posts:
+  //  - the pinned post comes from its own query and is prepended
+  //  - `select` parses a shallow copy, so a cross-post's cached author/permlink
+  //    are the wrapper's while the rendered ones are the original's
+  // Matching on the displayed identity is what the user actually acted on.
+  const [deletedVersion, setDeletedVersion] = useState(0);
 
   const cache = useAppSelector((state) => state.cache);
   const cacheRef = useRef(cache);
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const nsfw = useAppSelector((state) => state.application.nsfw);
-  const { mutes } = currentAccount;
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const nsfw = useAppSelector(selectNsfw);
+  const mutes = currentAccount?.mutes || [];
+
+  const intl = useIntl();
+  const dispatch = useAppDispatch();
+  const authContext = useAuthContext();
+  const sdkDeleteMutation = useDeleteComment(currentAccount?.name, authContext, 'async');
 
   const pinnedPostQuery = useGetPostQuery({
     author: feedUsername,
@@ -51,261 +82,278 @@ export const useFeedQuery = ({
 
   const queryClient = useQueryClient();
 
+  // Determine which query options to use based on filterKey
+  const isAccountBasedFeed =
+    filterKey === 'friends' ||
+    filterKey === 'posts' ||
+    filterKey === 'blog' ||
+    filterKey === 'reblog';
+  const isCommunityFeed = filterKey === 'communities';
+
+  // Map filterKey to SDK sort parameter
+  let sdkSort = filterKey;
+  let sdkTag = tag;
+  const sdkAccount = feedUsername;
+
+  if (filterKey === 'friends') {
+    sdkSort = 'feed';
+  } else if (isCommunityFeed) {
+    sdkSort = 'created';
+    sdkTag = 'my';
+  }
+
+  // Get appropriate query options from SDK
+  // IMPORTANT: Pass undefined (not empty string) for observer when no account
+  // Empty string causes API to not return user's votes in active_votes array
+  const observer = currentAccount?.name || currentAccount?.username;
+
+  const queryOptions = isAccountBasedFeed
+    ? getAccountPostsInfiniteQueryOptions(
+        sdkAccount || '',
+        sdkSort,
+        POSTS_FETCH_COUNT,
+        observer,
+        Boolean(sdkAccount), // only enable when account is present
+      )
+    : getPostsRankedInfiniteQueryOptions(
+        sdkSort as any,
+        sdkTag || '',
+        POSTS_FETCH_COUNT,
+        observer,
+        true, // enabled
+      );
+
+  // Stable timestamp: only advances when query data changes (dataUpdatedAt).
+  // Avoids new Date() inside select which would defeat TanStack structural sharing.
+  const feedQuery = useInfiniteQuery({
+    ...(queryOptions as any),
+    // No client-side retry here. These reads go through hive-tx, which already
+    // walks the node pool (config.retry, bounded by resilience.totalBudgetFactor)
+    // before it rejects, so a React Query retry on top only doubles how long the
+    // screen holds a skeleton before it is allowed to show the error.
+    retry: false,
+    select: useCallback(
+      (data: any) => {
+        if (!data?.pages) return data;
+
+        const filteredPages = data.pages.map((page: any) => {
+          if (!Array.isArray(page)) return page;
+
+          const nsfwFiltered = nsfw !== '0' ? filterNsfwPost(page, nsfw) : page;
+
+          // Shallow-copy before parsing: parsePost mutates its argument in place and
+          // `nsfwFiltered` holds React Query cache objects — mutating them defeats
+          // structural sharing and re-parses already-parsed data on every refetch.
+          return nsfwFiltered.map((post) =>
+            parsePost({ ...post }, currentAccount?.name, false, true, false),
+          );
+        });
+
+        return {
+          ...data,
+          pages: filteredPages,
+        };
+      },
+      [nsfw, currentAccount?.name],
+    ),
+  });
+
+  // actions
+  const _handleAppStateChange = useCallback(
+    (nextAppState: any) => {
+      if (
+        appState.current.match(/inactive|background/) &&
+        nextAppState === 'active' &&
+        feedQuery.data?.pages &&
+        feedQuery.data.pages.length > 0
+      ) {
+        // Invalidate query to fetch fresh data when app comes to foreground
+        queryClient.invalidateQueries({ queryKey: queryOptions.queryKey });
+      }
+
+      appState.current = nextAppState;
+    },
+    [feedQuery.data?.pages, queryOptions.queryKey, queryClient],
+  );
+
   // side effects
   useEffect(() => {
-    if (enableFetchOnAppState) {
-      appStateSubRef.current = AppState.addEventListener('change', _handleAppStateChange);
-    }
-    return _cleanup;
-  }, []);
+    if (!enableFetchOnAppState) return;
+    appStateSubRef.current = AppState.addEventListener('change', _handleAppStateChange);
+    return () => appStateSubRef.current?.remove();
+  }, [enableFetchOnAppState, _handleAppStateChange]);
 
   // hook to update cache reference,
-  // workaround required since query fucntion do get passed an
-  // updated copy for states that are not part of query key and contexet while conext is not
+  // workaround required since query function do get passed an
+  // updated copy for states that are not part of query key and context while context is not
   // supported by useQueries
   useEffect(() => {
     cacheRef.current = cache;
   }, [cache]);
 
-  const _cleanup = () => {
-    if (postFetchTimerRef.current) {
-      BackgroundTimer.clearTimeout(postFetchTimerRef.current);
-      postFetchTimerRef.current = null;
-    }
-    if (enableFetchOnAppState && appStateSubRef.current) {
-      appStateSubRef.current.remove();
-    }
-  };
-
-  // actions
-  const _handleAppStateChange = (nextAppState) => {
-    if (
-      appState.current.match(/inactive|background/) &&
-      nextAppState === 'active' &&
-      feedQueries[0].data &&
-      feedQueries[0].data.length > 0
-    ) {
-      _fetchLatestPosts();
-    }
-
-    appState.current = nextAppState;
-  };
-
-  const _fetchPosts = async (pageKey: string) => {
-    // console.log('fetching waves from:', host, pagePermlink);
-    const [startAuthor, startPermlink] = _parsePostLocalKey(pageKey);
-
-    let func = getAccountPosts;
-    const options: any = {
-      observer: feedUsername || '',
-      start_author: startAuthor,
-      start_permlink: startPermlink,
-      limit: POSTS_FETCH_COUNT,
-    };
-
-    switch (filterKey) {
-      case 'friends':
-        func = getAccountPosts;
-        options.sort = 'feed';
-        options.account = feedUsername;
-        break;
-      case 'communities':
-        func = getRankedPosts;
-        options.sort = 'created';
-        options.tag = 'my';
-        break;
-      case 'posts':
-      case 'blog':
-      case 'reblog':
-        func = getAccountPosts;
-        options.account = feedUsername;
-        options.sort = filterKey;
-        break;
-      default:
-        func = getRankedPosts;
-        options.sort = filterKey;
-        options.tag = tag;
-        break;
-    }
-
-    // fetching posts
-    const response: any[] = await func(options, feedUsername, nsfw);
-
-    if (!Array.isArray(response) || response.length == 0) {
-      return [];
-    }
-
-    if (!pageKey) {
-      _scheduleLatestPostsCheck(response[0]);
-    }
-
-    return response;
-  };
-
-  const _getNextPageParam = (lastPage: any[]) => {
-    const lastPost = !!lastPage?.length && lastPage[lastPage.length - 1];
-
-    console.log('extracting next page parameter', lastPost.url);
-    return _getPostLocalKey(lastPost?.author, lastPost?.permlink);
-  };
-
-  const _getFeedQueryKey = (pageKey: string) => [
-    QUERIES.FEED.GET,
-    feedUsername || tag,
-    filterKey,
-    pageKey,
-    cachePage,
-  ];
-
-  // query initialization
-  const feedQueries = useQueries({
-    queries: pageKeys.map((pageKey) => ({
-      queryKey: _getFeedQueryKey(pageKey),
-      queryFn: () => _fetchPosts(pageKey),
-      initialData: [],
-    })),
-  });
-
-  const _lastPage = feedQueries[feedQueries.length - 1];
-
   const _refresh = async () => {
     setIsRefreshing(true);
-    setPageKeys(['']);
 
-    pinnedPostQuery.refetch();
-    await feedQueries[0].refetch();
-
-    setIsRefreshing(false);
-  };
-
-  const _fetchNextPage = () => {
-    if (!_lastPage || _lastPage.isFetching || !isArray(_lastPage.data)) {
-      return;
-    }
-
-    const _pageKey = _getNextPageParam(_lastPage.data);
-    if (_pageKey && !pageKeys.includes(_pageKey)) {
-      pageKeys.push(_pageKey);
-      setPageKeys([...pageKeys]);
+    try {
+      await pinnedPostQuery.refetch();
+      await feedQuery.refetch();
+    } catch (error) {
+      console.warn('Error refreshing feed:', error);
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
-  // schedules post fetch
-  const _scheduleLatestPostsCheck = (firstPost?: any) => {
-    if (!firstPost && Array.isArray(feedQueries[0].data)) {
-      [firstPost] = feedQueries[0].data;
-    }
+  // Flatten pages data
+  const _flatData = useMemo(() => {
+    if (!feedQuery.data?.pages) return [];
+    return feedQuery.data.pages.flat();
+  }, [feedQuery.data?.pages]);
 
-    if (firstPost) {
-      if (postFetchTimerRef.current) {
-        BackgroundTimer.clearTimeout(postFetchTimerRef.current);
-        postFetchTimerRef.current = null;
-      }
-
-      const timeLeft = calculateTimeLeftForPostCheck(firstPost);
-      postFetchTimerRef.current = BackgroundTimer.setTimeout(() => {
-        _fetchLatestPosts();
-      }, timeLeft);
-    }
-  };
-
-  // fetch and filter posts that are not present in top 5 posts currently in list.
-  const _fetchLatestPosts = async () => {
-    const _fetchedPosts = await _fetchPosts('');
-    const _cachedPosts: any[] = queryClient.getQueryData(_getFeedQueryKey('')) || [];
-
-    const _latestPosts = [] as any;
-
-    _fetchedPosts.forEach((post) => {
-      const newPostAuthPrem = post.author + post.permlink;
-      const postExist = _cachedPosts.find(
-        (cPost) => cPost.author + cPost.permlink === newPostAuthPrem,
-      );
-
-      if (!postExist) {
-        _latestPosts.push(post);
-      }
-    });
-
-    if (_latestPosts.length > 0) {
-      setLatestPosts(_latestPosts.slice(0, 5));
-    } else {
-      _scheduleLatestPostsCheck();
-      setLatestPosts([]);
-    }
-  };
-
-  const _mergeLatestPosts = () => {
-    const _prevData = feedQueries[0].data || [];
-    const _firstPageKey = _getFeedQueryKey('');
-    queryClient.setQueryData(_firstPageKey, [...latestPosts, ..._prevData]);
-    _scheduleLatestPostsCheck(latestPosts[0]);
-    setLatestPosts([]);
-  };
-
-  const _resetLatestPosts = () => {
-    setLatestPosts([]);
-  };
-
-  const _data = unionBy(
-    pinnedPostQuery.data ? [pinnedPostQuery.data] : [],
-    ...feedQueries.map((query) => query.data),
-    'url',
+  // Combine pinned post with feed data
+  const _data = useMemo(
+    () => unionBy(pinnedPostQuery.data ? [pinnedPostQuery.data] : [], _flatData, 'url'),
+    [pinnedPostQuery.data, _flatData],
   );
+
+  // Apply mute filtering — Set for O(1) lookup instead of O(n) indexOf
+  const mutesSet = useMemo(() => (isArray(mutes) ? new Set(mutes) : null), [mutes]);
   const _filteredData = useMemo(
-    () => _data.filter((post) => (isArray(mutes) ? mutes.indexOf(post?.author) < 0 : true)),
-    [mutes, _data],
+    () =>
+      _data.filter(
+        (post) =>
+          (mutesSet ? !mutesSet.has(post?.author) : true) &&
+          !deletedPostKeys.has(`${post?.author}/${post?.permlink}`),
+      ),
+
+    [mutesSet, _data, deletedVersion],
+  );
+
+  /**
+   * Deletes a post and prunes it from this feed's cache.
+   *
+   * The options sheet's own delete path calls `navigation.goBack()`, which on a
+   * feed pops the screen the list is on, and it never touches the feed cache, so
+   * the deleted post stays visible. Consumers pass this as `onDelete` so the
+   * sheet delegates instead.
+   *
+   * The cache is patched rather than invalidated because the delete broadcasts
+   * async: `mutateAsync` resolves on mempool acceptance, so a refetch issued
+   * here would return pre-transaction state and bring the post straight back.
+   */
+  const deletePost = useCallback(
+    async (content: any) => {
+      if (!currentAccount?.name || !content?.permlink) {
+        return;
+      }
+
+      await sdkDeleteMutation.mutateAsync({
+        author: currentAccount.name,
+        permlink: content.permlink,
+        parentAuthor: content.parent_author || '',
+        parentPermlink: content.parent_permlink || '',
+      });
+
+      // Match author as well as permlink: a permlink is only unique per author,
+      // so filtering on it alone could drop someone else's post.
+      queryClient.setQueryData<InfiniteData<any[]>>(queryOptions.queryKey, (oldData) => {
+        if (!oldData?.pages) {
+          return oldData;
+        }
+        return {
+          ...oldData,
+          // Guarded like `select` above: a page is not assumed to be an array,
+          // and an unguarded filter here would throw and abort the whole cache
+          // update rather than skipping one page.
+          pages: oldData.pages.map((page) =>
+            Array.isArray(page)
+              ? page.filter(
+                  (post) =>
+                    !(post?.author === currentAccount.name && post?.permlink === content.permlink),
+                )
+              : page,
+          ),
+        };
+      });
+
+      // Deliberately does not clear the pinned post's own query. Emptying it
+      // forces a refetch, and the delete broadcasts async, so that refetch
+      // returns the not-yet-indexed post and puts it straight back. Recording
+      // the key suppresses the row whatever any cache still holds, and covers
+      // the cross-post case too, where the cached identity is the wrapper's
+      // while the rendered one is the original's.
+      deletedPostKeys.add(`${content.author}/${content.permlink}`);
+      setDeletedVersion((v) => v + 1);
+
+      dispatch(toastNotification(intl.formatMessage({ id: 'alert.removed' })));
+    },
+    [
+      currentAccount?.name,
+      // mutateAsync is stable across renders; the mutation result object is not.
+      sdkDeleteMutation.mutateAsync,
+      queryOptions.queryKey,
+      queryClient,
+      dispatch,
+      intl,
+    ],
   );
 
   return {
     data: _filteredData,
     isRefreshing,
-    isLoading: _lastPage.isLoading || _lastPage.isFetching,
-    latestPosts,
-    fetchNextPage: _fetchNextPage,
-    mergetLatestPosts: _mergeLatestPosts,
-    resetLatestPosts: _resetLatestPosts,
+    isLoading: feedQuery.isLoading,
+    fetchNextPage: feedQuery.fetchNextPage,
     refresh: _refresh,
+    deletePost,
+    // Surfaced so the list can render a retry instead of a skeleton that never
+    // resolves. Scoped to the first page: once posts are on screen a failed
+    // "load more" must not replace them with an error state.
+    isError: feedQuery.isError && _filteredData.length === 0,
+    error: feedQuery.error,
   };
 };
 
-/** hook used to return user drafts */
-export const usePromotedPostsQuery = () => {
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const nsfw = useAppSelector((state) => state.application.nsfw);
+/** hook used to return promoted posts with NSFW filtering */
+export const usePromotedPostsQuery = (enabled: boolean = true) => {
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const nsfw = useAppSelector(selectNsfw);
 
-  const _getPromotedPosts = async () => {
-    try {
-      const posts = await getPromotedEntries(currentAccount.username);
+  // Use SDK query options
+  const queryOptions = getPromotedPostsQuery('feed');
 
-      return Array.isArray(posts) ? filterNsfwPost(posts, nsfw) : [];
-    } catch (err) {
-      console.warn('Failed to get promoted posts, ', err);
-      return [];
-    }
-  };
+  return useQuery({
+    ...queryOptions,
+    enabled,
+    // Override queryKey to include username for cache invalidation (use empty string if no account)
+    queryKey: [QUERIES.FEED.GET_PROMOTED, currentAccount?.name || ''],
+    select: (data) => {
+      if (!Array.isArray(data)) return [];
 
-  return useQuery([QUERIES.FEED.GET_PROMOTED, currentAccount.username], _getPromotedPosts, {
-    initialData: [],
+      const nsfwFiltered = nsfw !== '0' ? filterNsfwPost(data as any, nsfw) : data;
+
+      return nsfwFiltered.map((post) => parsePost(post, currentAccount?.name, true, true, false));
+    },
+    // Handle errors gracefully
+    meta: {
+      errorMessage: 'Failed to get promoted posts',
+    },
   });
 };
 
-// cacludate posts check refresh time for selected filter;
+// calculate posts check refresh time for selected filter;
 export const calculateTimeLeftForPostCheck = (firstPost: any) => {
-  const refetchTime = 600000;
+  const refetchTime = 120000; // Check every 2 minutes for new content
 
-  // schedules refresh 30 minutes after last post creation time
+  // Calculate time since post creation to potentially adjust frequency
   const currentTime = new Date().getTime();
-  const createdAt = new Date(firstPost.created).getTime();
-
+  const createdAt = new Date(firstPost?.created).getTime();
   const timeSpent = currentTime - createdAt;
-  let timeLeft = refetchTime - timeSpent;
-  if (timeLeft < 30000) {
-    timeLeft = refetchTime;
-  }
-  return timeLeft;
-};
 
-const _getPostLocalKey = (author: string, permlink: string) =>
-  author && permlink ? `${author}/${permlink}` : undefined;
-const _parsePostLocalKey = (localKey: string) => (localKey ? localKey.split('/') : ['', '']);
+  // If post is very recent (< 5 minutes old), check more frequently
+  if (timeSpent < 300000) {
+    return 60000; // Check every 1 minute for fresh content
+  }
+
+  // Otherwise check every 2 minutes
+  return refetchTime;
+};

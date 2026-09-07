@@ -1,4 +1,4 @@
-import { fetchGlobalProps } from '../../providers/hive/dhive';
+import { getQueryClient, getDynamicPropsQueryOptions, type DynamicProps } from '@ecency/sdk';
 import {
   ADD_OTHER_ACCOUNT,
   FETCH_ACCOUNT_FAIL,
@@ -13,40 +13,79 @@ import {
 } from '../constants/constants';
 import { PrevLoggedInUsers } from '../reducers/accountReducer';
 
-export const fetchGlobalProperties = () => (dispatch) =>
-  fetchGlobalProps().then((res) =>
+export const fetchGlobalProperties = () => async (dispatch: any) => {
+  try {
+    const queryClient = getQueryClient();
+    const props: DynamicProps = await queryClient.fetchQuery(getDynamicPropsQueryOptions());
+
+    // SDK already returns parsed numeric values
+    const res = {
+      hivePerMVests: props.hivePerMVests,
+      base: props.base,
+      quote: props.quote,
+      fundRecentClaims: props.fundRecentClaims,
+      fundRewardBalance: props.fundRewardBalance,
+      votePowerReserveRate: props.votePowerReserveRate,
+      authorRewardCurve: props.authorRewardCurve,
+      contentConstant: props.contentConstant,
+      currentHardforkVersion: props.currentHardforkVersion,
+      lastHardfork: props.lastHardfork,
+      hbdPrintRate: props.hbdPrintRate,
+    };
+
     dispatch({
       type: SET_GLOBAL_PROPS,
       payload: { ...res },
-    }),
-  );
+    });
+  } catch (error) {
+    console.error('Failed to fetch global properties:', error);
+    dispatch(failedAccount(error));
+  }
+};
 
-export const updateCurrentAccount = (data) => ({
-  type: UPDATE_CURRENT_ACCOUNT,
-  payload: data,
-});
+export const updateCurrentAccount = (data: any) => {
+  if (!data) {
+    return {
+      type: UPDATE_CURRENT_ACCOUNT,
+      payload: data,
+    };
+  }
 
-export const addOtherAccount = (data) => ({
+  const normalized = { ...data };
+  if (!normalized.name && normalized.username) {
+    normalized.name = normalized.username;
+  }
+  if (!normalized.username && normalized.name) {
+    normalized.username = normalized.name;
+  }
+
+  return {
+    type: UPDATE_CURRENT_ACCOUNT,
+    payload: normalized,
+  };
+};
+
+export const addOtherAccount = (data: any) => ({
   type: ADD_OTHER_ACCOUNT,
   payload: data,
 });
 
-export const updateOtherAccount = (accountObj) => ({
+export const updateOtherAccount = (accountObj: any) => ({
   type: UPDATE_OTHER_ACCOUNT,
   payload: accountObj,
 });
 
-export const failedAccount = (data) => ({
+export const failedAccount = (data: any) => ({
   type: FETCH_ACCOUNT_FAIL,
   payload: data,
 });
 
-export const updateUnreadActivityCount = (data) => ({
+export const updateUnreadActivityCount = (data: any) => ({
   type: UPDATE_UNREAD_ACTIVITY_COUNT,
   payload: data,
 });
 
-export const removeOtherAccount = (data) => ({
+export const removeOtherAccount = (data: any) => ({
   type: REMOVE_OTHER_ACCOUNT,
   payload: data,
 });
@@ -55,7 +94,7 @@ export const removeAllOtherAccount = () => ({
   type: REMOVE_ALL_OTHER_ACCOUNT,
 });
 
-export const setGlobalProps = (data) => ({
+export const setGlobalProps = (data: any) => ({
   type: SET_GLOBAL_PROPS,
   payload: data,
 });

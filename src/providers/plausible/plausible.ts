@@ -1,29 +1,37 @@
 import { Platform } from 'react-native';
 import axios from 'axios';
-import Config from 'react-native-config';
 import DeviceInfo from 'react-native-device-info';
-import bugsnagInstance from '../../config/bugsnag';
-import {
-  convertStatsData,
-  getMetricsListForPostStats as getMetricsForPostStats,
-  parsePostStatsByDimension,
-  parsePostStatsResponse,
-} from './converters';
+import * as Sentry from '@sentry/react-native';
 
+import { isAxiosTransportError } from '../../config/axiosTimeout';
+import { DEFAULT_TIMEOUT_MS } from '../../utils/networkTimeout';
+
+// Pageview recording only. Post-stats *reads* now go through `@ecency/sdk`
+// (`getStatsQueryOptions` -> the server-side `/api/stats` proxy), so the stats
+// API key is no longer shipped in the app — see providers/queries/statsQueries.
+// Plausible's event-ingestion endpoint requires no auth.
 const PATH_EVENT_API = '/api/event';
-const PATH_STATS_API = '/api/v2/query';
 const SITE_ID = 'ecency.com';
 
 const plausibleApi = axios.create({
   baseURL: 'https://pl.ecency.com/',
   headers: {
-    Authorization: `Bearer ${Config.PLAUSIBLE_API_KEY}`,
     'Content-Type': 'application/json',
   },
+  // Fire-and-forget analytics, which is exactly why it must not hold one of the
+  // five concurrent slots the platform HTTP client allows per host when the path
+  // is broken: nothing is waiting on it to notice. Axios sets no deadline of its
+  // own and does not go through the global fetch wrapper.
+  timeout: DEFAULT_TIMEOUT_MS,
 });
 
 export const recordPlausibleEvent = async (urlPath: string, eventName?: string): Promise<void> => {
   try {
+    // Guard against undefined/empty paths reaching .replace (top Sentry crash:
+    // "Cannot read property 'replace' of undefined").
+    if (!urlPath) {
+      return;
+    }
     // form plausible recordable url
     const normalizedPath = urlPath.replace(/^\//, '');
     const url = `app://${Platform.OS}.${SITE_ID}/${normalizedPath}`;
@@ -35,7 +43,7 @@ export const recordPlausibleEvent = async (urlPath: string, eventName?: string):
       force: true,
     };
 
-    const userAgent = await DeviceInfo.getUserAgent();
+    const userAgent = getEcencyUserAgent();
     const res = await plausibleApi.post(PATH_EVENT_API, payload, {
       headers: { 'User-Agent': userAgent },
     });
@@ -46,73 +54,33 @@ export const recordPlausibleEvent = async (urlPath: string, eventName?: string):
 
     console.log(`Event "${eventName}" recorded successfully.`);
   } catch (error) {
-    bugsnagInstance.notify(error);
+    // Analytics is fire-and-forget: report but do not rethrow, otherwise the
+    // failure surfaces as an unhandled rejection from callers.
+    //
+    // Transport failures are NOT reported. This runs once per screen view, and
+    // now that the request has a deadline every pageview on a broken path
+    // produces an error instead of a silent hang; across the user base that is
+    // thousands of identical events a day for a call nothing waits on. Anything
+    // that is not a transport failure is still reported.
+    if (!isAxiosTransportError(error)) {
+      Sentry.captureException(error);
+    }
     console.error(`Failed to record event "${eventName}":`, error);
-    throw error;
   }
 };
 
-const fetchStats = async (
-  urlPath: string,
-  metrics: string[],
-  dimensions: string[],
-  dateRange = 'all',
-) => {
-  try {
-    const payload = {
-      site_id: SITE_ID,
-      metrics,
-      filters: [['contains', 'event:page', [urlPath]]],
-      dimensions,
-      date_range: dateRange,
-    };
+const getEcencyUserAgent = () => {
+  const appName = DeviceInfo.getApplicationName();
+  const appVersion = DeviceInfo.getVersion();
+  const systemName = Platform.OS === 'ios' ? 'iOS' : 'Android';
+  const systemVersion = DeviceInfo.getSystemVersion();
+  const deviceModel = DeviceInfo.getModel();
 
-    const res = await plausibleApi.post(PATH_STATS_API, payload);
+  // This combination ensures event appear as Mobile App with specific version installed
+  // The last part starting from Version/4.0 is essential for plausoible to record event as Mobile App, no other combination works
+  const userAgent = `${appName}/${appVersion} (${systemName} ${systemVersion}; ${deviceModel}) Version/4.0 Chrome/${appVersion} Mobile`;
 
-    if (res.status !== 200) {
-      throw new Error(`Plausible API responded with status ${res.status}`);
-    }
+  console.log('Plausible User Agent', userAgent);
 
-    const rawData = res.data;
-
-    const data = convertStatsData(rawData);
-
-    if (!data) {
-      throw new Error(`Failed to parse stats response data`);
-    }
-
-    return data;
-  } catch (error) {
-    bugsnagInstance.notify(error);
-    console.error(`Failed to fetch stats:`, error);
-    throw error;
-  }
-};
-
-export const fetchPostStats = async (urlPath: string, dateRange = 'all') => {
-  const metrics = getMetricsForPostStats();
-  const stats = await fetchStats(urlPath, metrics, [], dateRange);
-  const postStats = parsePostStatsResponse(stats);
-
-  if (!postStats) {
-    throw new Error('Failed to fetch post posts');
-  }
-
-  return postStats;
-};
-
-export const fetchPostStatsByDimension = async <T>(
-  urlPath: string,
-  dateRange = 'all',
-  dimensionKey: string,
-) => {
-  const metrics = getMetricsForPostStats();
-  const stats = await fetchStats(urlPath, metrics, [`visit:${dimensionKey}`], dateRange);
-  const postStats = parsePostStatsByDimension<T>(stats, dimensionKey);
-
-  if (!postStats) {
-    throw new Error('Failed to fetch post stats');
-  }
-
-  return postStats;
+  return userAgent;
 };

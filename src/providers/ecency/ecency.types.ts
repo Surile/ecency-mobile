@@ -1,8 +1,7 @@
-import { HiveEngineToken, MarketData } from 'providers/hive-engine/hiveEngine.types';
-import { SpkApiWallet } from 'providers/hive-spk/hiveSpk.types';
-import { QuoteItem } from '../../redux/reducers/walletReducer';
+import type { QuoteItem } from '../../redux/reducers/walletReducer';
 import { PollPreferredInterpretation } from '../hive/hive.types';
-import { ThreeSpeakVideo } from '../speak/speak.types';
+
+export type { QuoteItem };
 
 export interface ReceivedVestingShare {
   delegator: string;
@@ -17,7 +16,6 @@ export interface MediaItem {
   thumbUrl: string;
   created: string;
   timestamp: number;
-  speakData?: ThreeSpeakVideo;
 }
 
 export interface Snippet {
@@ -54,9 +52,12 @@ export interface PollDraft {
   endTime: string; // 2024-05-13T13:30:53.783Z
   voteChange: boolean;
   hideVotes: boolean;
+  hideResults: boolean;
   interpretation: PollPreferredInterpretation;
   choices: string[];
   maxChoicesVoted: number;
+  token?: string;
+  communityMembership: string[];
   filters: {
     accountAge: number;
   };
@@ -107,7 +108,7 @@ export interface LatestQuotes {
 
 export interface CommentHistoryItem {
   body: string;
-  tags: [string];
+  tags: string[]; // Changed from [string] tuple to string[] array to match SDK
   title: string;
   timestamp: string;
   v: number;
@@ -130,13 +131,38 @@ export interface PointActivity {
   blockNum?: number | string;
 }
 
-export interface AssetsPortfolio {
-  globalProps: { hivePerMVests: number };
-  marketData: MarketData;
-  accountData: any;
-  pointsData: EcencyUser;
-  engineData: HiveEngineToken[];
-  spkData: SpkApiWallet;
+interface TokenAction {
+  id: string;
+  // Later Add support for other properties required for dynamically generating ops on app end
+  // to:string
+  // from:string
+  // memoSupported:boolean
+  // precision:number
+  // etc
+}
+
+export type PortfolioLayer = 'points' | 'hive' | 'chain' | 'engine';
+
+export interface PortfolioItem {
+  name: string;
+  symbol: string;
+  layer: PortfolioLayer;
+  balance: number;
+  fiatRate: number;
+  precision: number; // SDK guarantees this field (defaults to 3)
+  address?: string;
+  pendingRewards?: number;
+  pendingRewardsFiat?: number;
+  liquid?: number;
+  liquidFiat?: number;
+  savings?: number;
+  savingsFiat?: number;
+  staked?: number;
+  stakedFiat?: number;
+  iconUrl?: string;
+  actions?: TokenAction[];
+  extraData?: Array<{ dataKey: string; value: any }>;
+  apr?: number;
 }
 
 export interface ProposalMeta {
@@ -161,13 +187,41 @@ export enum NotificationFilters {
   DELEGATIONS = 'delegations',
   FAVOURITES = 'nfavorites',
   BOOKMARKS = 'nbookmarks',
+  PAYOUTS = 'payouts',
+  SCHEDULED_PUBLISHED = 'scheduled_published',
+  // Filter path is plural while the notification `type` string is singular
+  // (`account_update`) — enotify routes on the plural form.
+  ACCOUNT_UPDATES = 'account_updates',
+  WEEKLY_EARNINGS = 'weekly_earnings',
+  // Posts carrying a hashtag the user follows (main type 23).
+  TAGS = 'tags',
 }
 
 export enum PointActivityIds {
-  VIEW_POST = 10,
+  CHECKIN = 10,
   LOGIN = 20,
   POST = 100,
   COMMENT = 110,
   VOTE = 120,
   REBLOG = 130,
+}
+
+export interface PostTip {
+  sender: string;
+  receiver: string;
+  amount: number;
+  currency: string;
+  memo: string;
+  source: 'engine' | 'blockchain' | 'points' | string;
+  timestamp: string;
+}
+
+export interface PostTipsMeta {
+  count: number;
+  totals: { [currency: string]: number };
+}
+
+export interface PostTipsResponse {
+  meta: PostTipsMeta;
+  list: PostTip[];
 }

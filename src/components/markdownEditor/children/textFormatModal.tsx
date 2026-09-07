@@ -32,7 +32,7 @@ export const TextFormatModal = forwardRef(
       return null;
     }
 
-    const _renderMarkupButton = ({ item }) => (
+    const _renderMarkupButton = ({ item }: any) => (
       <View style={styles.buttonWrapper}>
         <IconButton
           size={20}
@@ -53,7 +53,7 @@ export const TextFormatModal = forwardRef(
           style={styles.formatsWrapper}
           data={Formats}
           keyboardShouldPersistTaps="always"
-          renderItem={({ item, index }) => index < 3 && _renderMarkupButton({ item })}
+          renderItem={({ item }) => _renderMarkupButton({ item })}
           horizontal
         />
       );

@@ -1,39 +1,39 @@
 import { useQuery } from '@tanstack/react-query';
+import { getAnnouncementsQueryOptions } from '@ecency/sdk';
 import { useIntl } from 'react-intl';
 import { useDispatch } from 'react-redux';
 import { useEffect, useMemo } from 'react';
 import VersionNumber from 'react-native-version-number';
-import { getAnnouncements } from '../ecency/ecency';
-import QUERIES from './queryKeys';
-import { useAppSelector } from '../../hooks';
+import { SheetManager } from 'react-native-actions-sheet';
+import { useAppSelector, useLinkProcessor } from '../../hooks';
 import { updateAnnoucementsMeta } from '../../redux/actions/cacheActions';
-import { handleDeepLink, showActionModal } from '../../redux/actions/uiAction';
 import { getPostUrl } from '../../utils/post';
+import { isProposalAnnouncement, resolveAnnouncementAction } from '../../utils/announcementAction';
 import { delay } from '../../utils/editor';
 import { ButtonTypes } from '../../components/actionModal/container/actionModalContainer';
 import parseVersionNumber from '../../utils/parseVersionNumber';
-import { decryptKey } from '../../utils/crypto';
-import { getDigitPinCode } from '../hive/dhive';
+import { SheetNames } from '../../navigation/sheets';
+import { selectCurrentAccount, selectLastAppVersion } from '../../redux/selectors';
 
 const PROMPT_AGAIN_INTERVAL = 48 * 3600 * 1000; // 2 days
 
 export const useAnnouncementsQuery = () => {
   const intl = useIntl();
   const dispatch = useDispatch();
+  const linkProcessor = useLinkProcessor();
 
-  const pinHash = useAppSelector((state) => state.application.pin);
-
-  const lastAppVersion = useAppSelector((state) => state.application.lastAppVersion);
+  const lastAppVersion = useAppSelector(selectLastAppVersion);
   const appVersion = useMemo(() => VersionNumber.appVersion, []);
 
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
+  const currentAccount = useAppSelector(selectCurrentAccount);
   const announcementsMeta = useAppSelector((state) => state.cache.announcementsMeta);
 
-  const announcmentsQuery = useQuery([QUERIES.ANNOUNCEMENTS.GET], () => {
-    const encToken = currentAccount?.local?.accessToken;
-    const token = !!encToken && decryptKey(encToken, getDigitPinCode(pinHash));
-    return getAnnouncements(token);
-  });
+  // Prepare access token for SDK
+
+  // Use SDK query options
+  // SDK options take no arguments; the announcements endpoint is a plain
+  // unauthenticated GET (it is in ecencyApi's no-token list)
+  const announcementsQuery = useQuery(getAnnouncementsQueryOptions());
 
   useEffect(() => {
     // bypass if it's first launch after new version install/update
@@ -43,14 +43,19 @@ export const useAnnouncementsQuery = () => {
       return;
     }
 
+    // Skip proposal-support announcements on mobile: the native in-feed
+    // ProposalVoteRequest card already casts the vote in-app (within navigation),
+    // so surfacing the banner here would only add a redundant in-app-browser
+    // detour. Pick the first non-proposal announcement instead.
+    const firstAnnounce = announcementsQuery.data?.find((a) => !isProposalAnnouncement(a));
+
     // bypass if logged in user is required for announcement, skip otherwise
-    const firstAnnounce = announcementsMeta.data && announcmentsQuery.data[0];
-    if (!firstAnnounce || (firstAnnounce?.auth && !currentAccount?.username)) {
+    if (!firstAnnounce || (firstAnnounce?.auth && !currentAccount?.name)) {
       return;
     }
 
     // prepare annoucmnet data
-    const _metaId = `${firstAnnounce.id}_${currentAccount?.username || 'guest'}`;
+    const _metaId = `${firstAnnounce.id}_${currentAccount?.name || 'guest'}`;
     const _meta = announcementsMeta && announcementsMeta[_metaId];
     const curTime = new Date().getTime();
 
@@ -60,21 +65,21 @@ export const useAnnouncementsQuery = () => {
     }
 
     _showAnnouncement(firstAnnounce, _metaId);
-  }, [announcmentsQuery.data, currentAccount.username, lastAppVersion]);
+  }, [announcementsQuery.data, currentAccount?.name, lastAppVersion]);
 
-  const _showAnnouncement = async (data, metaId) => {
+  const _showAnnouncement = async (data: any, metaId: any) => {
     const _markAsSeen = () => {
       dispatch(updateAnnoucementsMeta(metaId, false));
     };
 
     const _onActionPress = () => {
-      if (data.ops) {
-        dispatch(handleDeepLink(data.ops));
-      } else if (data.button_link) {
-        const _url = data.button_link.startsWith('https://')
-          ? data.button_link
-          : getPostUrl(data.button_link);
-        dispatch(handleDeepLink(_url));
+      // Deliberately ignore the server-provided `ops` (hive://sign/op/...) blob:
+      // a banner tap must never sign an arbitrary server operation. Proposal
+      // voting happens through the in-app, user-reviewed flow on the linked page.
+      const action = resolveAnnouncementAction(data, getPostUrl);
+
+      if (action.type === 'open-link') {
+        linkProcessor.handleLink(action.url);
       }
 
       // mark as processed
@@ -95,13 +100,13 @@ export const useAnnouncementsQuery = () => {
 
     await delay(3000);
 
-    dispatch(
-      showActionModal({
+    SheetManager.show(SheetNames.ACTION_MODAL, {
+      payload: {
         title: data.title,
         body: data.description,
         buttons: _buttons,
         onClosed: _markAsSeen,
-      }),
-    );
+      },
+    });
   };
 };

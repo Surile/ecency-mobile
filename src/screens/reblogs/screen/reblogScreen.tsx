@@ -1,10 +1,19 @@
 import React, { useMemo, useState } from 'react';
-import { FlatList, RefreshControl, SafeAreaView } from 'react-native';
+import { FlatList, RefreshControl } from 'react-native';
 import { useIntl } from 'react-intl';
+import { useDispatch } from 'react-redux';
+import { useQueryClient } from '@tanstack/react-query';
 import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
 import Animated, { BounceInRight } from 'react-native-reanimated';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAppSelector } from '../../../hooks';
+import {
+  selectCurrentAccount,
+  selectIsLoggedIn,
+  selectIsDarkTheme,
+} from '../../../redux/selectors';
 import showLoginAlert from '../../../utils/showLoginAlert';
+import { isAlreadyReblogged, isInsufficientRcError } from '../../../utils/rcError';
 
 // Components
 import { BasicHeader, MainButton, UserListItem } from '../../../components';
@@ -16,47 +25,84 @@ import AccountListContainer from '../../../containers/accountListContainer';
 import globalStyles from '../../../globalStyles';
 import styles from '../styles/reblogScreen.styles';
 import { getTimeFromNow } from '../../../utils/time';
-import { reblogQueries } from '../../../providers/queries';
+import { repostQueries } from '../../../providers/queries';
+import { useReblogMutation } from '../../../providers/sdk/mutations';
+import { setRcOffer, toastNotification } from '../../../redux/actions/uiAction';
+import QUERIES from '../../../providers/queries/queryKeys';
 
-const renderUserListItem = (item, index, handleOnUserPress) => {
+const renderUserListItem = (item: any, index: any, handleOnUserPress: any) => {
+  // Safely handle timestamp - getTimeFromNow can return null
+  const description = (item.timestamp ? getTimeFromNow(item.timestamp) : null) ?? '';
+
   return (
     <UserListItem
       index={index}
       username={item.account}
-      description={getTimeFromNow(item.timestamp)}
+      description={description}
       handleOnPress={() => handleOnUserPress(item.account)}
     />
   );
 };
 
-const ReblogScreen = ({ route }) => {
+const ReblogScreen = ({ route }: any) => {
   const intl = useIntl();
+  const dispatch = useDispatch();
+  const queryClient = useQueryClient();
 
   const author = route.params?.author;
   const permlink = route.params?.permlink;
 
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const isLoggedIn = useAppSelector((state) => state.application.isLoggedIn);
-  const isDarkTheme = useAppSelector((state) => state.application.isDarkTheme);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
+  const isDarkTheme = useAppSelector(selectIsDarkTheme);
 
   const [isReblogging, setIsReblogging] = useState(false);
 
-  const reblogsQuery = reblogQueries.useGetReblogsQuery(author, permlink);
-  const reblogMutation = reblogQueries.useReblogMutation(author, permlink);
+  const reblogsQuery = repostQueries.useGetReblogsQuery(author, permlink);
+  const reblogMutation = useReblogMutation();
 
   // map reblogs data for account list
   const { reblogs, deleteEnabled } = useMemo(() => {
     let _reblogs: any[] = [];
     let _deleteEnabled = false;
     if (reblogsQuery.data instanceof Array) {
-      _reblogs = reblogsQuery.data.map((username) => ({ account: username }));
-      _deleteEnabled = currentAccount ? reblogsQuery.data.includes(currentAccount.username) : false;
+      // Safe extractor: ensures we always get a string username or null
+      const extractUsername = (item: any): string | null => {
+        if (typeof item === 'string') {
+          return item;
+        }
+        if (item && typeof item === 'object' && typeof item.account === 'string') {
+          return item.account;
+        }
+        // Unknown format - skip
+        return null;
+      };
+
+      _reblogs = reblogsQuery.data
+        .map((item) => {
+          const account = extractUsername(item);
+          if (!account) {
+            return null; // Skip invalid entries
+          }
+          return {
+            account,
+            timestamp: typeof item === 'object' ? (item as any).timestamp || null : null,
+          };
+        })
+        .filter(Boolean); // Remove null entries
+
+      // Extract usernames as strings only for deleteEnabled check
+      const usernames = reblogsQuery.data
+        .map(extractUsername)
+        .filter((username): username is string => username !== null);
+
+      _deleteEnabled = currentAccount ? usernames.includes(currentAccount.name) : false;
     }
     return {
       reblogs: _reblogs,
       deleteEnabled: _deleteEnabled,
     };
-  }, [reblogsQuery.data?.length]);
+  }, [reblogsQuery.data, currentAccount?.name]);
 
   const headerTitle = intl.formatMessage({
     id: 'reblog.title',
@@ -73,9 +119,56 @@ const ReblogScreen = ({ route }) => {
       return;
     }
 
-    if (isLoggedIn) {
-      setIsReblogging(true);
-      await reblogMutation.mutateAsync({ undo: deleteEnabled });
+    setIsReblogging(true);
+    try {
+      await reblogMutation.mutateAsync({ author, permlink, deleteReblog: deleteEnabled });
+
+      dispatch(
+        toastNotification(
+          intl.formatMessage({
+            id: deleteEnabled ? 'alert.success_reblog_deleted' : 'alert.success_rebloged',
+          }),
+        ),
+      );
+
+      // Optimistically update the on-screen list/count/button. The SDK broadcasts in
+      // async mode and only invalidates its own rebloggedBy key after a 4s indexer delay,
+      // which never touches this screen's overridden GET_REBLOGS cache key — so without
+      // this the count/button stay stale right after a successful reblog/unreblog.
+      const username = currentAccount?.name;
+      if (username) {
+        queryClient.setQueryData<string[]>([QUERIES.POST.GET_REBLOGS, author, permlink], (data) => {
+          const list = Array.isArray(data) ? [...data] : [];
+          const idx = list.indexOf(username);
+          if (deleteEnabled) {
+            if (idx >= 0) {
+              list.splice(idx, 1);
+            }
+          } else if (idx < 0) {
+            list.unshift(username);
+          }
+          return list;
+        });
+      }
+
+      // SDK only invalidates the account-posts "blog" filter, so refresh the "reblog"
+      // filter too, otherwise the profile Reblogs tab stays stale.
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey[0] === 'posts' &&
+          query.queryKey[1] === 'account-posts' &&
+          query.queryKey[2] === currentAccount?.name &&
+          query.queryKey[3] === 'reblog',
+      });
+    } catch (error: any) {
+      if (isAlreadyReblogged(error)) {
+        dispatch(toastNotification(intl.formatMessage({ id: 'alert.already_rebloged' })));
+      } else if (isInsufficientRcError(error)) {
+        dispatch(setRcOffer(true));
+      } else {
+        dispatch(toastNotification(intl.formatMessage({ id: 'alert.fail' })));
+      }
+    } finally {
       setIsReblogging(false);
     }
   };
@@ -97,14 +190,14 @@ const ReblogScreen = ({ route }) => {
 
   return (
     <AccountListContainer data={reblogs}>
-      {({ data, filterResult, handleSearch, handleOnUserPress }) => (
+      {({ data, filterResult, handleSearch, handleOnUserPress }: any) => (
         <SafeAreaView style={globalStyles.container}>
           {/* Your content goes here */}
           <BasicHeader
             title={`${headerTitle} (${data && data.length})`}
             backIconName="close"
             isHasSearch
-            handleOnSearch={(text) => handleSearch(text, 'account')}
+            handleOnSearch={(text: any) => handleSearch(text, 'account')}
           />
           <FlatList
             data={filterResult || data}

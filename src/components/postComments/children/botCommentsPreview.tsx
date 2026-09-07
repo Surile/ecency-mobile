@@ -13,7 +13,7 @@ interface BotCommentsProps {
 export const BotCommentsPreview = ({ comments }: BotCommentsProps) => {
   const navigation = useNavigation();
 
-  const commentsModalRef = useRef<typeof CommentsModal>();
+  const commentsModalRef = useRef<any>(null);
 
   if (!comments?.length) {
     return null;
@@ -42,7 +42,7 @@ export const BotCommentsPreview = ({ comments }: BotCommentsProps) => {
         <View style={styles.botAvatarsWrapper}>
           {comments.map((comment) => {
             return (
-              <View style={styles.item}>
+              <View key={`${comment.author}-${comment.permlink}`} style={styles.item}>
                 <UserAvatar username={comment.author} noAction />
               </View>
             );

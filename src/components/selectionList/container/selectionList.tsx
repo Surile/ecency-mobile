@@ -55,24 +55,14 @@ export const SelectionList = ({
       return 0;
     });
 
-    _data.splice(selectionRef.current.length, 0, { isSectionSeparator: true });
+    _data.splice(selectionRef.current.length, 0, { isSectionSeparator: true } as any);
 
     setSortedList(_data);
   };
 
-  const _onDragEnd = ({ data, from, to }) => {
+  const _onDragEnd = ({ data, from, to }: any) => {
     const totalSel = selectionRef.current.length;
     const item = sortedList[from];
-
-    // const _obj = {
-    //   id: item.symbol,
-    //   symbol: item.symbol,
-    //   isEngine: item.isEngine || false,
-    //   isSpk: item.isSpk || false,
-    //   notCrypto: false,
-    // };
-
-    // console.log('change order', item.symbol, from, to, 'total:', totalSel);
 
     if (from >= totalSel && to <= totalSel) {
       // insert in set at to
@@ -110,7 +100,7 @@ export const SelectionList = ({
     );
 
   const _renderItem = ({ item, drag }: { item: ListItem; drag: () => void }) => {
-    if (item.isSectionSeparator) {
+    if ((item as any).isSectionSeparator) {
       return _renderSectionSeparator(
         intl.formatMessage({ id: 'selection_list.available' }, { postfix: headerPostfix }),
       );
@@ -125,13 +115,6 @@ export const SelectionList = ({
         selectionRef.current.splice(index, 1);
       } else {
         selectionRef.current.push(item.id);
-        //     {
-        //     id: key,
-        //     symbol: key,
-        //     isEngine: item.isEngine || false,
-        //     isSpk: item.isSpk || false,
-        //     notCrypto: false,
-        // });
       }
 
       _updateSortedList();
@@ -144,14 +127,6 @@ export const SelectionList = ({
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <CheckBox clicked={_onPress} isChecked={isSelected} />
             {item.iconElement && item.iconElement}
-            {/* <AssetIcon
-                            id={item.symbol}
-                            containerStyle={styles.assetIconContainer}
-                            iconUrl={item.iconUrl}
-                            isEngine={item.isEngine}
-                            isSpk={item.isSpk}
-                            iconSize={24}
-                        /> */}
             <Text style={styles.informationText}>{item.label}</Text>
           </View>
           <TouchableWithoutFeedback onPressIn={drag} style={styles.dragBtnContainer}>

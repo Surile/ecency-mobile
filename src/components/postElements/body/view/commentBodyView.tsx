@@ -2,7 +2,6 @@ import React, { Fragment, useState } from 'react';
 import { useWindowDimensions, View } from 'react-native';
 import { useIntl } from 'react-intl';
 
-import { LongPressGestureHandler, State } from 'react-native-gesture-handler';
 import RootNavigation from '../../../../navigation/rootNavigation';
 
 // Constants
@@ -22,31 +21,37 @@ import { GLOBAL_POST_FILTERS_VALUE } from '../../../../constants/options/filters
 interface CommentBodyProps {
   body: string;
   metadata?: any;
+  author?: string;
+  permlink?: string;
   commentDepth: number;
   hideContent: boolean;
-  handleOnContentPress: () => void;
-  handleOnUserPress: () => void;
-  handleOnPostPress: () => void;
-  handleOnLongPress: () => void;
+  handleOnUserPress?: (username?: string) => void;
+  handleOnPostPress?: (permlink?: string, author?: string) => void;
   handleVideoPress: () => void;
   handleYoutubePress: () => void;
   handleImagePress: () => void;
   handleLinkPress: () => void;
+  handleOnContentPress: () => void;
+  handleParaSelection: (selectedText: string) => void;
+  onTagPress?: (tag: string) => void;
 }
 
 const CommentBody = ({
   body,
   metadata,
+  author,
+  permlink,
   commentDepth,
   hideContent,
-  handleOnContentPress,
   handleOnUserPress,
   handleOnPostPress,
-  handleOnLongPress,
   handleVideoPress,
   handleYoutubePress,
   handleImagePress,
   handleLinkPress,
+  handleOnContentPress,
+  handleParaSelection,
+  onTagPress,
 }: CommentBodyProps) => {
   const dispatch = useAppDispatch();
   const dims = useWindowDimensions();
@@ -57,32 +62,28 @@ const CommentBody = ({
 
   const _contentWidth = dims.width - (40 + 28 + (commentDepth > 2 ? 44 : 0));
 
-  const _onLongPressStateChange = ({ nativeEvent }) => {
-    if (nativeEvent.state === State.ACTIVE) {
-      handleOnLongPress();
-    }
-  };
-
   const _showLowComment = () => {
     setRevealComment(true);
   };
 
   const _handleTagPress = (tag: string, filter: string = GLOBAL_POST_FILTERS_VALUE[0]) => {
     if (tag) {
+      if (onTagPress && !isCommunity(tag)) {
+        onTagPress(tag);
+        return;
+      }
       const name = isCommunity(tag) ? ROUTES.SCREENS.COMMUNITY : ROUTES.SCREENS.TAG_RESULT;
-      const key = `${filter}/${tag}`;
       RootNavigation.navigate({
         name,
         params: {
           tag,
           filter,
-          key,
         },
       });
     }
   };
 
-  const _handleOnPostPress = (permlink, author) => {
+  const _handleOnPostPress = (permlink: any, author: any) => {
     if (handleOnPostPress) {
       handleOnPostPress(permlink, author);
       return;
@@ -99,7 +100,7 @@ const CommentBody = ({
     }
   };
 
-  const _handleOnUserPress = (username) => {
+  const _handleOnUserPress = (username: any) => {
     if (handleOnUserPress) {
       handleOnUserPress(username);
       return;
@@ -126,25 +127,26 @@ const CommentBody = ({
   return (
     <Fragment>
       {revealComment ? (
-        <LongPressGestureHandler onHandlerStateChange={_onLongPressStateChange}>
-          <View>
-            <PostHtmlRenderer
-              key={`comment_width_${_contentWidth}`}
-              contentWidth={_contentWidth}
-              body={body}
-              metadata={metadata}
-              isComment={true}
-              setSelectedImage={handleImagePress}
-              setSelectedLink={handleLinkPress}
-              handleOnPostPress={_handleOnPostPress}
-              handleOnUserPress={_handleOnUserPress}
-              handleTagPress={_handleTagPress}
-              handleVideoPress={handleVideoPress}
-              handleYoutubePress={handleYoutubePress}
-              handleOnContentPress={handleOnContentPress}
-            />
-          </View>
-        </LongPressGestureHandler>
+        <View>
+          <PostHtmlRenderer
+            key={`comment_width_${_contentWidth}`}
+            contentWidth={_contentWidth}
+            body={body}
+            metadata={metadata}
+            author={author}
+            permlink={permlink}
+            isComment={true}
+            setSelectedImage={handleImagePress}
+            setSelectedLink={handleLinkPress}
+            handleOnPostPress={_handleOnPostPress}
+            handleOnUserPress={_handleOnUserPress}
+            handleTagPress={_handleTagPress}
+            handleVideoPress={handleVideoPress}
+            handleYoutubePress={handleYoutubePress}
+            handleOnContentPress={handleOnContentPress}
+            handleParaSelection={handleParaSelection}
+          />
+        </View>
       ) : (
         <TextButton
           style={styles.revealButton}

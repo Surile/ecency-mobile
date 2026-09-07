@@ -1,10 +1,12 @@
 import React, { Fragment, useMemo, useState } from 'react';
 import { View } from 'react-native';
 import get from 'lodash/get';
+import { useNavigation } from '@react-navigation/native';
+import { useIntl } from 'react-intl';
 
 // Components
 import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
-import { Header, TabbedPosts } from '../../../components';
+import { Header, TabbedPosts, FabButton } from '../../../components';
 
 // Styles
 import styles from './feedStyles';
@@ -18,14 +20,24 @@ import {
 import { useAppSelector } from '../../../hooks';
 import CommentsTabContent from '../../../components/profile/children/commentsTabContent';
 import { TabItem } from '../../../components/tabbedPosts/types/tabbedPosts.types';
+import ROUTES from '../../../constants/routeNames';
+import showLoginAlert from '../../../utils/showLoginAlert';
+import { selectCurrentAccount, selectIsLoggedIn } from '../../../redux/selectors';
+import WavesOnboardingChecklist from '../../waves/children/wavesOnboardingChecklist';
 
 const FeedScreen = () => {
-  const isLoggedIn = useAppSelector((state) => state.application.isLoggedIn);
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
+  const intl = useIntl();
+  const navigation = useNavigation();
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
+  const currentAccount = useAppSelector(selectCurrentAccount);
 
   const mainTabs = useAppSelector((state) => state.customTabs.mainTabs);
 
   const [lazyLoad, setLazyLoad] = useState(false);
+
+  // Calculate FAB offset to account for bottom tab bar
+  // On Android, add tab bar height (~50px + padding). On iOS, keep it simple as safe areas are handled properly
+  const fabBottomOffset = 16;
 
   const _lazyLoadContent = () => {
     if (!lazyLoad) {
@@ -56,8 +68,8 @@ const FeedScreen = () => {
   const _contentComentsTab = (type: 'comments' | 'replies') => {
     return (
       <CommentsTabContent
-        username={currentAccount.username}
-        selectedUser={currentAccount.username}
+        username={currentAccount.name}
+        selectedUser={currentAccount.name}
         isOwnProfile={true}
         type={type}
       />
@@ -69,18 +81,34 @@ const FeedScreen = () => {
       feedFilters.indexOf('comments') >= 0
         ? new Map([[feedFilters.indexOf('comments'), _contentComentsTab('comments')]])
         : undefined,
-    [feedFilters],
+    [feedFilters, currentAccount],
   );
+
+  // Create a stable key for TabbedPosts using a simple join
+  // This is much faster than JSON.stringify and still resets when filters change
+  const tabbedPostsKey = useMemo(() => feedFilters.join(','), [feedFilters]);
+
+  const _onCreatePress = () => {
+    if (!isLoggedIn) {
+      showLoginAlert({ intl });
+      return;
+    }
+
+    navigation.navigate(ROUTES.SCREENS.EDITOR);
+  };
 
   return (
     <Fragment>
       <Header showQR={true} showBoost={true} />
       <View style={styles.container} onLayout={_lazyLoadContent}>
+        {/* Feed is the landing screen after signup/login; the card self-gates
+            to fresh accounts and renders nothing for established users. */}
+        {isLoggedIn && <WavesOnboardingChecklist />}
         {lazyLoad && (
           <TabbedPosts
-            key={JSON.stringify(feedFilters)} // this hack of key change resets tabbedposts whenever filters chanage, effective to remove filter change android bug
+            key={tabbedPostsKey} // Use memoized key to reset tabbedposts when filters change (addresses Android filter change bug)
             tabFilters={tabFilters}
-            selectedOptionIndex={isLoggedIn ? 0 : 1}
+            selectedOptionIndex={0}
             feedUsername={get(currentAccount, 'name', null)}
             tabContentOverrides={tabContentOverrides}
             isFeedScreen={true}
@@ -88,6 +116,7 @@ const FeedScreen = () => {
           />
         )}
       </View>
+      <FabButton bottomOffset={fabBottomOffset} onPress={_onCreatePress} />
     </Fragment>
   );
 };

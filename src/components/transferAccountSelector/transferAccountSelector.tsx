@@ -2,6 +2,7 @@ import React, { useCallback, useMemo, useRef } from 'react';
 import { useIntl } from 'react-intl';
 import { Text, View } from 'react-native';
 import { debounce } from 'lodash';
+import { useDispatch } from 'react-redux';
 import TransferTypes from '../../constants/transferTypes';
 import DropdownButton from '../dropdownButton';
 import Icon from '../icon';
@@ -11,8 +12,7 @@ import UserAvatar from '../userAvatar';
 
 // Styles
 import styles from './transferAccountSelectorStyles';
-import { Market } from '../../providers/hive-spk/hiveSpk.types';
-import { SPK_NODE_ECENCY } from '../../providers/hive-spk/hiveSpk';
+import { toastNotification } from '../../redux/actions/uiAction';
 
 export interface TransferAccountSelectorProps {
   accounts: any;
@@ -30,8 +30,9 @@ export interface TransferAccountSelectorProps {
   setIsUsernameValid: (value: boolean) => void;
   memo: string;
   setMemo: (value: string) => void;
-  spkMarkets: Market[];
   getRecurrentTransferOfUser: (username: string) => string;
+  allowMultipleDest?: boolean;
+  badActors?: Set<string>;
 }
 
 const TransferAccountSelector = ({
@@ -50,30 +51,25 @@ const TransferAccountSelector = ({
   setIsUsernameValid,
   memo,
   setMemo,
-  spkMarkets,
   getRecurrentTransferOfUser,
+  allowMultipleDest,
+  badActors,
 }: TransferAccountSelectorProps) => {
   const intl = useIntl();
+  const dispatch = useDispatch();
   const destinationRef = useRef<string[]>([]);
 
   const destinationLocked = useMemo(() => {
     switch (transferType) {
       case TransferTypes.CONVERT:
-      case TransferTypes.PURCHASE_ESTM:
-      case TransferTypes.UNSTAKE_ENGINE:
-      case TransferTypes.POWER_UP_SPK:
-      case TransferTypes.POWER_DOWN_SPK:
-      case TransferTypes.LOCK_LIQUIDITY_SPK:
+      case TransferTypes.UNSTAKE:
         return true;
       default:
         return false;
     }
   }, [transferType]);
 
-  const allowMultipleDest =
-    transferType === TransferTypes.TRANSFER_TOKEN || transferType === TransferTypes.POINTS;
-
-  const _handleOnFromUserChange = (username) => {
+  const _handleOnFromUserChange = (username: any) => {
     fetchBalance(username);
     setFrom(username);
 
@@ -82,7 +78,7 @@ const TransferAccountSelector = ({
     }
   };
 
-  const _handleOnDestinationChange = (username) => {
+  const _handleOnDestinationChange = (username: any) => {
     destinationRef.current = username;
     setDestination(username);
   };
@@ -92,6 +88,13 @@ const TransferAccountSelector = ({
       if (usernames.length === 0) {
         console.log('No usernames provided.');
         setIsUsernameValid(false); // No usernames means invalid
+        return;
+      }
+
+      if (usernames.length > 5) {
+        console.log('Too many usernames provided. Maximum is 5.');
+        dispatch(toastNotification(intl.formatMessage({ id: 'transfer.too_many_usernames' })));
+        setIsUsernameValid(false); // Too many usernames means invalid
         return;
       }
 
@@ -138,25 +141,34 @@ const TransferAccountSelector = ({
       _amount = val.replace(',', '.');
     }
     if (state === 'amount') {
-      if (parseFloat(Number(_amount)) <= parseFloat(balance)) {
+      if (parseFloat(Number(_amount) as any) <= parseFloat(balance)) {
         setAmount(_amount);
       }
     }
     if (state === 'destination') {
+      // Force lowercase for usernames (Hive usernames are always lowercase)
+      const trimmedLowercase = val.trim().toLowerCase();
+
       // Step 1: Split the destination input into an array of usernames
-      const usernames = val
-        ? val.trim().split(/[\s,]+/) // Split by spaces or commas
+      const usernames = trimmedLowercase
+        ? trimmedLowercase.split(/[\s,]+/).filter(Boolean) // Split by spaces or commas
         : [];
-      _debouncedValidateUsername(allowMultipleDest ? usernames : [val]);
-      destinationRef.current = allowMultipleDest ? usernames : [val];
-      setDestination(_amount);
+      _debouncedValidateUsername(
+        allowMultipleDest ? usernames : trimmedLowercase ? [trimmedLowercase] : [],
+      );
+      destinationRef.current = allowMultipleDest
+        ? usernames
+        : trimmedLowercase
+        ? [trimmedLowercase]
+        : [];
+      setDestination(trimmedLowercase);
     }
     if (state === 'memo') {
-      setMemo(_amount);
+      setMemo(val);
     }
   };
 
-  const _renderDropdown = (usernames, defaultSelection, onSelectionChange) => (
+  const _renderDropdown = (usernames: any, defaultSelection: any, onSelectionChange: any) => (
     <DropdownButton
       dropdownButtonStyle={styles.dropdownButtonStyle}
       rowTextStyle={styles.rowTextStyle}
@@ -166,13 +178,13 @@ const TransferAccountSelector = ({
       options={usernames}
       defaultText={defaultSelection}
       selectedOptionIndex={usernames.indexOf(defaultSelection)}
-      onSelect={(index, value) => onSelectionChange(value)}
+      onSelect={(index: any, value: any) => onSelectionChange(value)}
     />
   );
 
-  const _renderInput = (placeholder, state, keyboardType, isTextArea) => (
+  const _renderInput = (placeholder: any, state: any, keyboardType: any, isTextArea: any) => (
     <TextInput
-      style={[isTextArea ? styles.textarea : styles.input]}
+      style={[isTextArea ? styles.textarea : styles.input] as any}
       onChangeText={(amount) => _handleOnChange(state, amount)}
       value={
         state === 'destination'
@@ -193,31 +205,18 @@ const TransferAccountSelector = ({
   );
 
   const _destinationInput = !destinationLocked ? (
-    transferType === TransferTypes.DELEGATE_SPK ? (
-      <TransferFormItem
-        label={intl.formatMessage({ id: 'transfer.to' })}
-        rightComponent={() =>
-          _renderDropdown(
-            spkMarkets.map((market) => market.name),
-            SPK_NODE_ECENCY,
-            _handleOnDestinationChange,
-          )
-        }
-      />
-    ) : (
-      <TransferFormItem
-        label={intl.formatMessage({ id: 'transfer.to' })}
-        rightComponent={() =>
-          _renderInput(
-            intl.formatMessage({ id: 'transfer.to_placeholder' }),
-            'destination',
-            'default',
-            false,
-          )
-        }
-        containerStyle={styles.elevate}
-      />
-    )
+    <TransferFormItem
+      label={intl.formatMessage({ id: 'transfer.to' })}
+      rightComponent={() =>
+        _renderInput(
+          intl.formatMessage({ id: 'transfer.to_placeholder' }),
+          'destination',
+          'default',
+          false,
+        )
+      }
+      containerStyle={styles.elevate}
+    />
   ) : null;
 
   return (
@@ -233,7 +232,7 @@ const TransferAccountSelector = ({
         label={intl.formatMessage({ id: 'transfer.from' })}
         rightComponent={() =>
           _renderDropdown(
-            accounts.map((account) => account.username),
+            accounts.map((account: any) => account.username),
             currentAccountName,
             _handleOnFromUserChange,
           )
@@ -241,6 +240,12 @@ const TransferAccountSelector = ({
       />
 
       {_destinationInput}
+
+      {destination && badActors?.has(destination.trim().toLowerCase()) && (
+        <Text style={styles.badActorWarning}>
+          {intl.formatMessage({ id: 'transfer.to_bad_actor' })}
+        </Text>
+      )}
 
       <View style={styles.toFromAvatarsContainer}>
         <UserAvatar username={from} size="xl" style={styles.userAvatar} noAction />

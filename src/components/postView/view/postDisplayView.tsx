@@ -1,36 +1,44 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, useWindowDimensions } from 'react-native';
 import { injectIntl } from 'react-intl';
 import get from 'lodash/get';
+import isEqual from 'lodash/isEqual';
 
 // Providers
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // Utils
 import { useQueryClient } from '@tanstack/react-query';
+import { SheetManager } from 'react-native-actions-sheet';
 import { getTimeFromNow } from '../../../utils/time';
 
 // Components
 import { PostHeaderDescription, PostBody, Tags } from '../../postElements';
 import { PostPlaceHolder, StickyBar, TextWithIcon, NoPost } from '../../basicUIElements';
+import { Icon } from '../../icon';
 import { ParentPost } from '../../parentPost';
+import { PostReadingMetadata } from '../children/postReadingMetadata';
+import { PostTranslateInline } from '../children/postTranslateInline';
 
 // Styles
 import styles from './postDisplayStyles';
+import { EcencySourceBadge } from '../../ecencySourceBadge';
 import { WritePostButton } from '../../atoms';
-import { useAppDispatch } from '../../../hooks';
-import { showProfileModal, showReplyModal } from '../../../redux/actions/uiAction';
 import { PostTypes } from '../../../constants/postTypes';
-import { useUserActivityMutation } from '../../../providers/queries/pointQueries';
-import { PointActivityIds } from '../../../providers/ecency/ecency.types';
+import { useCheckIn } from '../../../providers/queries/pointQueries';
 import { PostComments } from '../../postComments';
+import { SimilarEntries } from '../../similarEntries';
+import { NewsletterPostPrompt } from '../../newsletterPostPrompt';
 import { UpvoteButton } from '../../postCard/children/upvoteButton';
 import UpvotePopover from '../../upvotePopover';
 import { PostPoll } from '../../postPoll';
 import QUERIES from '../../../providers/queries/queryKeys';
-import { usePostStatsQuery } from '../../../providers/queries';
+import { usePostStatsQuery, getPostStatsDateRange, tipsQueries } from '../../../providers/queries';
 import { PostStatsModal } from '../../organisms';
 import { getAbbreviatedNumber } from '../../../utils/number';
+import { SheetNames } from '../../../navigation/sheets';
+import RootNavigation from '../../../navigation/rootNavigation';
+import ROUTES from '../../../constants/routeNames';
 
 const PostDisplayView = ({
   currentAccount,
@@ -45,114 +53,221 @@ const PostDisplayView = ({
   isPostUnavailable,
   author,
   permlink,
-  activeVotes,
   isWavePost,
   activeVotesCount,
-}) => {
-  const dispatch = useAppDispatch();
+}: any) => {
   const insets = useSafeAreaInsets();
 
   const queryClient = useQueryClient();
-  const userActivityMutation = useUserActivityMutation();
+  const recordCheckIn = useCheckIn();
   const dims = useWindowDimensions();
-  const postStatsQuery = usePostStatsQuery(post?.url || '');
+  // Per-render (not memoized on `created`) so the `to` bound stays current if the
+  // post screen lives across midnight; react-query value-hashes the range in the
+  // query key, so a same-day recompute doesn't trigger a refetch.
+  const postStatsDateRange = getPostStatsDateRange(post?.created);
+  const postStatsQuery = usePostStatsQuery(post?.url || '', postStatsDateRange);
+  const tipsQuery = tipsQueries.usePostTipsQuery({
+    author: post?.author,
+    permlink: post?.permlink,
+  });
 
-  const postCommentsRef = useRef<PostComments>(null);
-  const upvotePopoverRef = useRef<UpvotePopover>(null);
-  const postStatsModalRef = useRef<typeof PostStatsModal>(null);
+  const postCommentsRef = useRef<any>(null);
+  const upvotePopoverRef = useRef<any>(null);
+  const postStatsModalRef = useRef<any>(null);
 
-  const [cacheVoteIcrement] = useState(0);
   const [isLoadedComments, setIsLoadedComments] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [postBodyLoading, setPostBodyLoading] = useState(true);
-  const [tags, setTags] = useState([]);
+  const [tags, setTags] = useState<any[]>([]);
+  // Full plain-text translation shown in place of the body; reset per post.
+  const [translatedBody, setTranslatedBody] = useState<{ text: string; rtl: boolean } | null>(null);
+
+  useEffect(() => {
+    setTranslatedBody(null);
+  }, [permlink]);
+
+  // Stable reference so PostTranslateInline's memo isn't defeated every render.
+  const _handleTranslatedBody = useCallback(
+    (text: string | null, rtl?: boolean) => setTranslatedBody(text ? { text, rtl: !!rtl } : null),
+    [],
+  );
 
   // Component Life Cycles
+  // Reading a post, comment or reply (incl. opened from notifications) is a check-in.
+  // Not mount-only: a cold start from a deep link can render this before persisted
+  // auth is restored, and `recordCheckIn` changes identity once the account lands,
+  // so the check-in still gets recorded. Its own throttle keeps repeats cheap.
   useEffect(() => {
-    if (isLoggedIn && get(currentAccount, 'name') && !isNewPost) {
-      // track user activity for view post
-      userActivityMutation.mutate({
-        pointsTy: PointActivityIds.VIEW_POST,
-      });
+    if (!isNewPost) {
+      recordCheckIn();
     }
-  }, []);
+  }, [isNewPost, recordCheckIn]);
+
+  const processedTags = useMemo(() => {
+    if (!post) return [];
+
+    const rawTags = get(post.json_metadata, 'tags', []);
+    let _tags: any[] = [];
+    if (Array.isArray(rawTags)) {
+      _tags = [...rawTags];
+    } else if (typeof rawTags === 'string') {
+      _tags = [rawTags];
+    }
+
+    if (post.category && !_tags.includes(post.category)) {
+      _tags = [post.category, ..._tags];
+    }
+
+    return _tags;
+  }, [post?.json_metadata, post?.category]);
 
   useEffect(() => {
-    if (post) {
-      const _tags = get(post.json_metadata, 'tags', []);
-      if (post.category && _tags[0] !== post.category && Array.isArray(_tags)) {
-        _tags.splice(0, 0, post.category);
+    setTags((prevTags) => {
+      // Only update if tags have actually changed
+      if (!isEqual(prevTags, processedTags)) {
+        return processedTags;
       }
-      setTags(_tags);
-    }
-  }, [post]);
+      return prevTags;
+    });
+  }, [processedTags]);
 
   // Component Functions
-  const onRefresh = useCallback(() => {
+  const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    fetchPost().then(() => setRefreshing(false));
-    queryClient.resetQueries([QUERIES.POST.GET_POLL, author, permlink]);
-  }, [refreshing]);
+    try {
+      await fetchPost();
+    } finally {
+      setRefreshing(false);
+      queryClient.resetQueries({ queryKey: [QUERIES.POST.GET_POLL, author, permlink] });
+    }
+  }, [fetchPost, queryClient, author, permlink]);
 
-  const _scrollToComments = () => {
+  const _scrollToComments = useCallback(() => {
     if (postCommentsRef.current) {
       postCommentsRef.current.scrollToComments();
     }
-  };
+  }, []);
 
-  const _handleOnReblogsPress = () => {
-    if (post.reblogs > 0 && handleOnReblogsPress) {
+  const _handleOnReblogsPress = useCallback(() => {
+    if (handleOnReblogsPress) {
       handleOnReblogsPress();
     }
-  };
+  }, [handleOnReblogsPress]);
 
-  const _onUpvotePress = ({
-    sourceRef,
-    content,
-    onVotingStart,
-    showPayoutDetails = false,
-    postType = isWavePost ? PostTypes.WAVE : parentPost ? PostTypes.COMMENT : PostTypes.POST,
-  }: any) => {
-    if (upvotePopoverRef.current) {
-      upvotePopoverRef.current.showPopover({
-        sourceRef,
-        content,
-        showPayoutDetails,
-        postType,
-        onVotingStart,
-      });
+  const _onUpvotePress = useCallback(
+    ({
+      sourceRef,
+      content,
+      onVotingStart,
+      showPayoutDetails = false,
+      postType = isWavePost ? PostTypes.WAVE : parentPost ? PostTypes.COMMENT : PostTypes.POST,
+    }: any) => {
+      if (upvotePopoverRef.current) {
+        upvotePopoverRef.current.showPopover({
+          sourceRef,
+          content,
+          showPayoutDetails,
+          postType,
+          onVotingStart,
+        });
+      }
+    },
+    [isWavePost, parentPost],
+  );
+
+  const _showStatsModal = useCallback(() => {
+    postStatsModalRef.current?.show(post?.url);
+  }, [post?.url]);
+
+  const _handleOnTipPress = useCallback(() => {
+    if (!isLoggedIn) {
+      // TODO: Show login prompt
+      console.log('Login required to send tips');
+      return;
     }
-  };
+    SheetManager.show(SheetNames.TIPPING_DIALOG, {
+      payload: {
+        post,
+        onSuccess: () => {
+          tipsQuery.refetch();
+        },
+      },
+    });
+  }, [isLoggedIn, post, tipsQuery]);
 
-  const _showStatsModal = () => {
-    postStatsModalRef.current?.show(post.url);
-  };
+  const stickyWrapperStyle = useMemo(
+    () => [styles.stickyWrapper, { paddingBottom: insets.bottom || 8 }],
+    [insets.bottom],
+  );
 
-  const _renderActionPanel = (isFixedFooter = false) => {
-    return (
-      <StickyBar isFixedFooter={isFixedFooter} style={styles.stickyBar}>
-        <View style={[styles.stickyWrapper, { paddingBottom: insets.bottom ? insets.bottom : 8 }]}>
+  const parentType = useMemo(() => (parentPost ? PostTypes.COMMENT : PostTypes.POST), [parentPost]);
+
+  const handleUpvotePress = useCallback(
+    (sourceRef: any, onVotingStart: any) => {
+      _onUpvotePress({ sourceRef, content: post, onVotingStart });
+    },
+    [_onUpvotePress, post],
+  );
+
+  const handlePayoutDetailsPress = useCallback(
+    (sourceRef: any) => {
+      _onUpvotePress({ sourceRef, content: post, showPayoutDetails: true });
+    },
+    [_onUpvotePress, post],
+  );
+
+  const handleVotersIconPress = useCallback(() => {
+    if (handleOnVotersPress) {
+      handleOnVotersPress();
+    }
+  }, [handleOnVotersPress]);
+
+  // show quick reply modal
+  const _showQuickReplyModal = useCallback(
+    (_post = post) => {
+      if (isLoggedIn) {
+        SheetManager.show(SheetNames.QUICK_POST, {
+          payload: {
+            mode: 'comment',
+            parentPost: _post,
+          },
+        });
+      } else {
+        console.log('Not LoggedIn');
+      }
+    },
+    [isLoggedIn, post],
+  );
+
+  const _renderActionPanel = useMemo(
+    () => (
+      <StickyBar isFixedFooter={true} style={styles.stickyBar}>
+        <View style={stickyWrapperStyle}>
           <UpvoteButton
-            activeVotes={activeVotes}
             isShowPayoutValue={true}
             content={post}
-            parentType={parentPost ? PostTypes.COMMENT : PostTypes.POST}
             boldPayout={true}
-            onUpvotePress={(sourceRef, onVotingStart) => {
-              _onUpvotePress({ sourceRef, content: post, onVotingStart });
-            }}
-            onPayoutDetailsPress={(sourceRef) => {
-              _onUpvotePress({ sourceRef, content: post, showPayoutDetails: true });
-            }}
+            onUpvotePress={handleUpvotePress}
+            onPayoutDetailsPress={handlePayoutDetailsPress}
           />
           <TextWithIcon
             iconName="heart-outline"
             iconStyle={styles.barIcons}
             iconType="MaterialCommunityIcons"
             isClickable
-            onPress={() => handleOnVotersPress && handleOnVotersPress()}
-            text={activeVotesCount + cacheVoteIcrement}
-            textMarginLeft={20}
+            onPress={handleVotersIconPress}
+            text={activeVotesCount}
+            accessibilityLabel={intl.formatMessage(
+              {
+                id: 'post.a11y_votes',
+                defaultMessage: '{count, plural, one {# vote} other {# votes}}',
+              },
+              { count: activeVotesCount || 0 },
+            )}
+            accessibilityHint={intl.formatMessage({
+              id: 'post.a11y_voters_hint',
+              defaultMessage: 'View voters',
+            })}
           />
           <TextWithIcon
             iconName="repeat"
@@ -160,8 +275,18 @@ const PostDisplayView = ({
             iconType="MaterialIcons"
             isClickable
             onPress={_handleOnReblogsPress}
-            text={post.reblogs || ''}
-            textMarginLeft={20}
+            text={post?.reblogs ?? 0}
+            accessibilityLabel={intl.formatMessage(
+              {
+                id: 'post.a11y_reblogs',
+                defaultMessage: '{count, plural, one {# reblog} other {# reblogs}}',
+              },
+              { count: post?.reblogs ?? 0 },
+            )}
+            accessibilityHint={intl.formatMessage({
+              id: 'post.a11y_reblogs_hint',
+              defaultMessage: 'View reblogs',
+            })}
           />
           {isLoggedIn && (
             <TextWithIcon
@@ -170,10 +295,20 @@ const PostDisplayView = ({
               iconType="MaterialCommunityIcons"
               isClickable
               text={get(post, 'children', 0)}
-              textMarginLeft={20}
               onLongPress={_showQuickReplyModal}
-              onPress={() => _scrollToComments()}
+              onPress={_scrollToComments}
               isLoading={!isLoadedComments}
+              accessibilityLabel={intl.formatMessage(
+                {
+                  id: 'post.a11y_comments',
+                  defaultMessage: '{count, plural, one {# comment} other {# comments}}',
+                },
+                { count: get(post, 'children', 0) },
+              )}
+              accessibilityHint={intl.formatMessage({
+                id: 'post.a11y_comments_hint',
+                defaultMessage: 'View comments',
+              })}
             />
           )}
           {!isLoggedIn && (
@@ -183,30 +318,245 @@ const PostDisplayView = ({
               iconType="MaterialCommunityIcons"
               isClickable
               text={get(post, 'children', 0)}
-              textMarginLeft={20}
+              accessibilityLabel={intl.formatMessage(
+                {
+                  id: 'post.a11y_comments',
+                  defaultMessage: '{count, plural, one {# comment} other {# comments}}',
+                },
+                { count: get(post, 'children', 0) },
+              )}
             />
           )}
 
           <TextWithIcon
-            iconName="eye-outline"
+            iconName="gift-outline"
             iconStyle={styles.barIcons}
             iconType="MaterialCommunityIcons"
             isClickable
-            onPress={_showStatsModal}
-            text={getAbbreviatedNumber(postStatsQuery.data?.pageviews || 0)}
-            textMarginLeft={20}
-            isLoading={postStatsQuery.isLoading}
+            onPress={_handleOnTipPress}
+            text={tipsQuery.data?.meta?.count || 0}
+            isLoading={tipsQuery.isLoading}
+            accessibilityLabel={intl.formatMessage(
+              {
+                id: 'post.a11y_tips',
+                defaultMessage: '{count, plural, one {# tip} other {# tips}}',
+              },
+              { count: tipsQuery.data?.meta?.count || 0 },
+            )}
+            accessibilityHint={intl.formatMessage({
+              id: 'post.a11y_tip',
+              defaultMessage: 'Send tip',
+            })}
           />
         </View>
       </StickyBar>
-    );
-  };
+    ),
+    [
+      stickyWrapperStyle,
+      post,
+      parentType,
+      handleUpvotePress,
+      handlePayoutDetailsPress,
+      handleVotersIconPress,
+      activeVotesCount,
+      _handleOnReblogsPress,
+      isLoggedIn,
+      _showQuickReplyModal,
+      _scrollToComments,
+      isLoadedComments,
+      _handleOnTipPress,
+      tipsQuery.data?.meta?.count,
+      tipsQuery.isLoading,
+      intl,
+    ],
+  );
 
-  const { name } = currentAccount;
+  const name = currentAccount?.name;
 
   const formatedTime = post && getTimeFromNow(post.created);
 
-  const capitalize = (appname) => appname && appname[0].toUpperCase() + appname.slice(1);
+  const capitalize = (appname: any) => appname && appname[0].toUpperCase() + appname.slice(1);
+
+  // matches the "via {appname}" label, which defaults to Ecency when no app metadata is set
+  const isFromEcency = (post?.json_metadata?.app?.split('/')[0] || 'ecency')
+    .toLowerCase()
+    .includes('ecency');
+
+  // AI-usage disclosure (interoperable) shown next to the "posted via" line.
+  const _postAiTools = post?.json_metadata?.ai_tools;
+  const hasAiTools = !!(_postAiTools?.media_generation || _postAiTools?.writing_edit);
+
+  const _handleOnPostBodyLoad = useCallback(() => {
+    setPostBodyLoading(false);
+  }, []);
+
+  // show quick reply modal
+  const _showQuickProfileModal = useCallback((username: any) => {
+    if (username) {
+      SheetManager.show(SheetNames.QUICK_PROFILE, {
+        payload: {
+          username,
+        },
+      });
+    }
+  }, []);
+
+  const _openProfilePage = useCallback((username: any) => {
+    if (!username) {
+      return;
+    }
+    RootNavigation.navigate({
+      name: ROUTES.SCREENS.PROFILE,
+      params: { username },
+      key: username,
+    });
+  }, []);
+
+  const _handleOnCommentsLoaded = useCallback(() => {
+    setIsLoadedComments((prev) => prev || true);
+  }, []);
+
+  const _handleContentLayout = useCallback((event: any) => {
+    if (__DEV__) {
+      console.log('content view height', event.nativeEvent.layout.height);
+    }
+  }, []);
+
+  const _postContentView = useMemo(
+    () => (
+      <>
+        {parentPost && <ParentPost post={parentPost} />}
+
+        <View style={styles.header}>
+          {!post ? (
+            <PostPlaceHolder />
+          ) : (
+            <View onLayout={_handleContentLayout}>
+              {!!post.title && !post.depth ? (
+                <Text style={styles.title}>{post.title}</Text>
+              ) : (
+                <View style={styles.titlePlaceholder} />
+              )}
+
+              <View style={styles.headerWithStats}>
+                <PostHeaderDescription
+                  date={formatedTime}
+                  name={author || post.author}
+                  currentAccountUsername={name}
+                  reputation={post.author_reputation}
+                  size={40}
+                  inlineTime={true}
+                  customStyle={styles.headerLine}
+                  avatarOnPress={_showQuickProfileModal}
+                  profileOnPress={_openProfilePage}
+                />
+                <View style={styles.viewStatsContainer}>
+                  <TextWithIcon
+                    iconName="eye-outline"
+                    iconStyle={styles.viewStatsIcon}
+                    iconType="MaterialCommunityIcons"
+                    isClickable
+                    onPress={_showStatsModal}
+                    text={getAbbreviatedNumber(postStatsQuery.data?.visits || 0)}
+                    isLoading={postStatsQuery.isLoading}
+                    accessibilityLabel={intl.formatMessage(
+                      {
+                        id: 'post.a11y_views',
+                        defaultMessage: '{count, plural, one {# view} other {# views}}',
+                      },
+                      { count: postStatsQuery.data?.visits || 0 },
+                    )}
+                    accessibilityHint={intl.formatMessage({
+                      id: 'post.a11y_stats_hint',
+                      defaultMessage: 'View post stats',
+                    })}
+                  />
+                </View>
+              </View>
+              {post && <PostReadingMetadata post={post} />}
+              <PostTranslateInline post={post} onTranslate={_handleTranslatedBody} />
+              {translatedBody ? (
+                <Text
+                  selectable
+                  style={[styles.translatedBody, translatedBody.rtl && styles.translatedBodyRtl]}
+                >
+                  {translatedBody.text}
+                </Text>
+              ) : (
+                <PostBody
+                  body={post.body}
+                  metadata={post.json_metadata}
+                  author={post.author}
+                  permlink={post.permlink}
+                  enableViewabilityTracker={true}
+                  onLoadEnd={_handleOnPostBodyLoad}
+                />
+              )}
+
+              <PostPoll author={author} permlink={permlink} metadata={post.json_metadata} />
+
+              {!postBodyLoading && (
+                <View style={styles.footer}>
+                  <Tags tags={tags} />
+                  <View style={styles.footerSourceRow}>
+                    <Text style={styles.footerText}>
+                      {intl.formatMessage(
+                        { id: 'post.posted_by' },
+                        {
+                          username: author || post.author,
+                          appname: post?.json_metadata?.app
+                            ? capitalize(post?.json_metadata?.app?.split('/')[0])
+                            : 'Ecency',
+                        },
+                      )}
+                      {formatedTime}
+                    </Text>
+                    {isFromEcency && <EcencySourceBadge style={styles.ecencySourceBadge} />}
+                    {hasAiTools && (
+                      <Icon
+                        name="robot-outline"
+                        iconType="MaterialCommunityIcons"
+                        style={styles.aiToolsBadge}
+                        accessible={true}
+                        accessibilityLabel={intl.formatMessage({ id: 'ai_usage.disclosed' })}
+                      />
+                    )}
+                  </View>
+                  <WritePostButton
+                    placeholderId="quick_reply.placeholder"
+                    onPress={_showQuickReplyModal}
+                  />
+                </View>
+              )}
+              {!postBodyLoading && <NewsletterPostPrompt post={post} />}
+              {!postBodyLoading && <SimilarEntries post={post} />}
+            </View>
+          )}
+        </View>
+      </>
+    ),
+    [
+      parentPost,
+      post,
+      author,
+      permlink,
+      name,
+      formatedTime,
+      tags,
+      translatedBody,
+      _handleTranslatedBody,
+      postBodyLoading,
+      postStatsQuery.data?.visits,
+      postStatsQuery.isLoading,
+      _showQuickProfileModal,
+      _openProfilePage,
+      _showStatsModal,
+      _handleOnPostBodyLoad,
+      _showQuickReplyModal,
+      _handleContentLayout,
+      intl,
+    ],
+  );
 
   if (isPostUnavailable) {
     return (
@@ -219,94 +569,6 @@ const PostDisplayView = ({
     );
   }
 
-  const _handleOnPostBodyLoad = () => {
-    setPostBodyLoading(false);
-  };
-
-  // show quick reply modal
-  const _showQuickReplyModal = (_post = post) => {
-    if (isLoggedIn) {
-      dispatch(showReplyModal({ mode: 'comment', parentPost: _post }));
-    } else {
-      console.log('Not LoggedIn');
-    }
-  };
-
-  // show quick reply modal
-  const _showQuickProfileModal = (username) => {
-    if (username) {
-      dispatch(showProfileModal(username));
-    }
-  };
-
-  const _handleOnCommentsLoaded = () => {
-    setIsLoadedComments(true);
-  };
-
-  const _postContentView = (
-    <>
-      {parentPost && <ParentPost post={parentPost} />}
-
-      <View style={styles.header}>
-        {!post ? (
-          <PostPlaceHolder />
-        ) : (
-          <View
-            onLayout={(event) => {
-              console.log('content view height', event.nativeEvent.layout.height);
-            }}
-          >
-            {!!post.title && !post.depth ? (
-              <Text style={styles.title}>{post.title}</Text>
-            ) : (
-              <View style={styles.titlePlaceholder} />
-            )}
-
-            <PostHeaderDescription
-              date={formatedTime}
-              name={author || post.author}
-              currentAccountUsername={name}
-              reputation={post.author_reputation}
-              size={40}
-              inlineTime={true}
-              customStyle={styles.headerLine}
-              profileOnPress={_showQuickProfileModal}
-            />
-            <PostBody
-              body={post.body}
-              metadata={post.json_metadata}
-              onLoadEnd={_handleOnPostBodyLoad}
-            />
-
-            <PostPoll author={author} permlink={permlink} metadata={post.json_metadata} />
-
-            {!postBodyLoading && (
-              <View style={styles.footer}>
-                <Tags tags={tags} />
-                <Text style={styles.footerText}>
-                  {intl.formatMessage(
-                    { id: 'post.posted_by' },
-                    {
-                      username: author || post.author,
-                      appname: post?.json_metadata?.app
-                        ? capitalize(post?.json_metadata?.app?.split('/')[0])
-                        : 'Ecency',
-                    },
-                  )}
-                  {formatedTime}
-                </Text>
-                <WritePostButton
-                  placeholderId="quick_reply.placeholder"
-                  onPress={_showQuickReplyModal}
-                />
-              </View>
-            )}
-          </View>
-        )}
-      </View>
-    </>
-  );
-
   return (
     <View style={styles.container}>
       <View style={[styles.scroll, styles.scrollContent, { width: dims.width }]}>
@@ -315,6 +577,7 @@ const PostDisplayView = ({
           author={author || post?.author}
           mainAuthor={author || post?.author}
           permlink={permlink || post?.permlink}
+          pinnedReply={post?.json_metadata?.pinned_reply}
           commentCount={post?.children}
           fetchPost={fetchPost}
           handleOnVotersPress={handleOnVotersPress}
@@ -329,7 +592,7 @@ const PostDisplayView = ({
           onUpvotePress={_onUpvotePress}
         />
       </View>
-      {post && _renderActionPanel(true)}
+      {post && _renderActionPanel}
 
       <UpvotePopover ref={upvotePopoverRef} />
       <PostStatsModal ref={postStatsModalRef} post={post} />

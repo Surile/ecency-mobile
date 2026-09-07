@@ -2,49 +2,71 @@ import React, { useEffect, useState } from 'react';
 import { useIntl } from 'react-intl';
 import { get } from 'lodash';
 import { Text, View, FlatList } from 'react-native';
-import { useSelector, useDispatch } from 'react-redux';
+import { useDispatch } from 'react-redux';
 import { useNavigation } from '@react-navigation/native';
-import { NoPost, PostCardPlaceHolder, UserListItem } from '../..';
+import { SheetManager } from 'react-native-actions-sheet';
+import { getCommunityQueryOptions } from '@ecency/sdk';
+import { useQueryClient } from '@tanstack/react-query';
+import {
+  useAppSelector,
+  useCommunitySubscriptionAction,
+  useFollowUserAction,
+} from '../../../hooks';
+import { NoPost, PostCardPlaceHolder, QueryErrorRetry, UserListItem } from '../..';
 import globalStyles from '../../../globalStyles';
 import { CommunityListItem, EmptyScreen } from '../../basicUIElements';
 import styles from '../styles/tabbedPosts.styles';
 import { default as ROUTES } from '../../../constants/routeNames';
+import { fetchCommunities } from '../../../redux/actions/communitiesAction';
+import { fetchLeaderboard } from '../../../redux/actions/userAction';
+import { SheetNames } from '../../../navigation/sheets';
 import {
-  fetchCommunities,
-  leaveCommunity,
-  subscribeCommunity,
-} from '../../../redux/actions/communitiesAction';
-import { fetchLeaderboard, followUser, unfollowUser } from '../../../redux/actions/userAction';
-import { getCommunity } from '../../../providers/hive/dhive';
-import { toggleAccountsBottomSheet } from '../../../redux/actions/uiAction';
+  selectIsLoggedIn,
+  selectCurrentAccount,
+  selectPrevLoggedInUsers,
+} from '../../../redux/selectors';
 
 interface TabEmptyViewProps {
   filterKey: string;
   isNoPost: boolean;
+  /** The first page failed and there is nothing cached to show instead. */
+  isError?: boolean;
+  error?: unknown;
+  isRetrying?: boolean;
+  onRetry?: () => void;
 }
 
-const TabEmptyView = ({ filterKey, isNoPost }: TabEmptyViewProps) => {
+const TabEmptyView = ({
+  filterKey,
+  isNoPost,
+  isError,
+  // Renamed on the way in: this component already destructures an `error` out of
+  // the leaderboard and communities redux slices further down.
+  error: loadError,
+  isRetrying,
+  onRetry,
+}: TabEmptyViewProps) => {
   const intl = useIntl();
   const dispatch = useDispatch();
   const navigation = useNavigation();
+  const queryClient = useQueryClient();
 
   // redux properties
-  const isLoggedIn = useSelector((state) => state.application.isLoggedIn);
-  const subscribingCommunities = useSelector(
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
+  const subscribingCommunities = useAppSelector(
     (state) => state.communities.subscribingCommunitiesInFeedScreen,
   );
-  const isVisibleAccountsBottomSheet = useSelector(
-    (state) => state.ui.isVisibleAccountsBottomSheet,
-  );
-  const prevLoggedInUsers = useSelector((state) => state.account.prevLoggedInUsers);
-  const [recommendedCommunities, setRecommendedCommunities] = useState([]);
-  const [recommendedUsers, setRecommendedUsers] = useState([]);
-  const followingUsers = useSelector((state) => state.user.followingUsersInFeedScreen);
-  const currentAccount = useSelector((state) => state.account.currentAccount);
-  const pinCode = useSelector((state) => state.application.pin);
 
-  const leaderboard = useSelector((state) => state.user.leaderboard);
-  const communities = useSelector((state) => state.communities.communities);
+  const prevLoggedInUsers = useAppSelector(selectPrevLoggedInUsers);
+  const [recommendedCommunities, setRecommendedCommunities] = useState<any[]>([]);
+  const [recommendedUsers, setRecommendedUsers] = useState<any[]>([]);
+  const followingUsers = useAppSelector((state) => state.user.followingUsersInFeedScreen);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const handleCommunitySubscription = useCommunitySubscriptionAction();
+  const handleFollowUser = useFollowUserAction();
+
+  const leaderboard = useAppSelector((state) => state.user.leaderboard);
+  const communities = useAppSelector((state) => state.communities.communities);
 
   // hooks
 
@@ -133,13 +155,13 @@ const TabEmptyView = ({ filterKey, isNoPost }: TabEmptyViewProps) => {
   }, [followingUsers]);
 
   // fetching
-  const _getRecommendedUsers = () => dispatch(fetchLeaderboard());
-  const _getRecommendedCommunities = () => dispatch(fetchCommunities('', 10));
+  const _getRecommendedUsers = () => dispatch(fetchLeaderboard() as any);
+  const _getRecommendedCommunities = () => dispatch(fetchCommunities(10) as any);
 
   // formating
-  const _formatRecommendedCommunities = async (communitiesArray) => {
+  const _formatRecommendedCommunities = async (communitiesArray: any) => {
     try {
-      const ecency = await getCommunity('hive-125125');
+      const ecency = await queryClient.fetchQuery(getCommunityQueryOptions('hive-125125'));
 
       const recommendeds = [ecency, ...communitiesArray];
       recommendeds.forEach((item) => Object.assign(item, { isSubscribed: false }));
@@ -150,82 +172,45 @@ const TabEmptyView = ({ filterKey, isNoPost }: TabEmptyViewProps) => {
     }
   };
 
-  const _formatRecommendedUsers = (usersArray) => {
+  const _formatRecommendedUsers = (usersArray: any) => {
     const recommendeds = usersArray.slice(0, 10);
 
     recommendeds.unshift({ _id: 'good-karma' });
     recommendeds.unshift({ _id: 'ecency' });
 
-    recommendeds.forEach((item) => Object.assign(item, { isFollowing: false }));
+    recommendeds.forEach((item: any) => Object.assign(item, { isFollowing: false }));
 
     setRecommendedUsers(recommendeds);
   };
 
   // actions related routines
-  const _handleSubscribeCommunityButtonPress = (data) => {
-    let subscribeAction;
-    let successToastText = '';
-    let failToastText = '';
+  const _handleSubscribeCommunityButtonPress = (data: any) => {
+    const successToastText = intl.formatMessage({
+      id: data.isSubscribed ? 'alert.success_leave' : 'alert.success_subscribe',
+    });
+    const failToastText = intl.formatMessage({
+      id: data.isSubscribed ? 'alert.fail_leave' : 'alert.fail_subscribe',
+    });
 
-    if (!data.isSubscribed) {
-      subscribeAction = subscribeCommunity;
-
-      successToastText = intl.formatMessage({
-        id: 'alert.success_subscribe',
-      });
-      failToastText = intl.formatMessage({
-        id: 'alert.fail_subscribe',
-      });
-    } else {
-      subscribeAction = leaveCommunity;
-
-      successToastText = intl.formatMessage({
-        id: 'alert.success_leave',
-      });
-      failToastText = intl.formatMessage({
-        id: 'alert.fail_leave',
-      });
-    }
-
-    dispatch(
-      subscribeAction(currentAccount, pinCode, data, successToastText, failToastText, 'feedScreen'),
-    );
+    handleCommunitySubscription(data, successToastText, failToastText, 'feedScreen');
   };
 
-  const _handleFollowUserButtonPress = (data, isFollowing) => {
-    let followAction;
-    let successToastText = '';
-    let failToastText = '';
+  const _handleFollowUserButtonPress = (data: any, isFollowing: any) => {
+    const successToastText = intl.formatMessage({
+      id: isFollowing ? 'alert.success_unfollow' : 'alert.success_follow',
+    });
+    const failToastText = intl.formatMessage({
+      id: isFollowing ? 'alert.fail_unfollow' : 'alert.fail_follow',
+    });
 
-    if (!isFollowing) {
-      followAction = followUser;
-
-      successToastText = intl.formatMessage({
-        id: 'alert.success_follow',
-      });
-      failToastText = intl.formatMessage({
-        id: 'alert.fail_follow',
-      });
-    } else {
-      followAction = unfollowUser;
-
-      successToastText = intl.formatMessage({
-        id: 'alert.success_unfollow',
-      });
-      failToastText = intl.formatMessage({
-        id: 'alert.fail_unfollow',
-      });
-    }
-
-    data.follower = get(currentAccount, 'name', '');
-
-    dispatch(followAction(currentAccount, pinCode, data, successToastText, failToastText));
+    const followData = { ...data, following: data._id, follower: get(currentAccount, 'name', '') };
+    handleFollowUser(followData, isFollowing, successToastText, failToastText);
   };
 
   const _handleOnPressLogin = () => {
     // if there is any prevLoggedInUser, show account switch modal
     if (prevLoggedInUsers && prevLoggedInUsers?.length > 0) {
-      dispatch(toggleAccountsBottomSheet(!isVisibleAccountsBottomSheet));
+      SheetManager.show(SheetNames.ACCOUNTS_SHEET);
     } else {
       navigation.navigate(ROUTES.SCREENS.LOGIN);
     }
@@ -274,7 +259,7 @@ const TabEmptyView = ({ filterKey, isNoPost }: TabEmptyViewProps) => {
                 isFollowing={item.isFollowing}
                 isLoadingRightAction={followingUsers[item._id]?.loading}
                 onPressRightText={_handleFollowUserButtonPress}
-                handleOnPress={(username) =>
+                handleOnPress={(username: any) =>
                   navigation.navigate({
                     name: ROUTES.SCREENS.PROFILE,
                     params: {
@@ -309,7 +294,7 @@ const TabEmptyView = ({ filterKey, isNoPost }: TabEmptyViewProps) => {
                 subscribers={item.subscribers}
                 isNsfw={item.is_nsfw}
                 name={item.name}
-                handleOnPress={(name) =>
+                handleOnPress={(name: any) =>
                   navigation.navigate({
                     name: ROUTES.SCREENS.COMMUNITY,
                     params: {
@@ -329,6 +314,14 @@ const TabEmptyView = ({ filterKey, isNoPost }: TabEmptyViewProps) => {
     } else {
       return <EmptyScreen style={styles.emptyAnimationContainer} />;
     }
+  }
+
+  // Checked after the logged-out and empty-feed branches, both of which are
+  // real answers rather than failures, and before the placeholder: the
+  // placeholder is the fallthrough for "still loading", so without this a feed
+  // whose first page failed keeps a skeleton on screen with no way forward.
+  if (isError && onRetry) {
+    return <QueryErrorRetry error={loadError} onRetry={onRetry} isRetrying={isRetrying} />;
   }
 
   return (

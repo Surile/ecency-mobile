@@ -5,8 +5,7 @@ export default EStyleSheet.create({
     flexDirection: 'row',
     width: '100%',
     backgroundColor: '$primaryBackgroundColor',
-    paddingTop: 8,
-    paddingBottom: 12,
+    paddingBottom: 4,
   },
   containerReverse: {
     justifyContent: 'space-between',
@@ -20,7 +19,6 @@ export default EStyleSheet.create({
     borderBottomLeftRadius: 68 / 2,
   },
   avatarButtonWrapper: {
-    backgroundColor: '#357ce6',
     height: 50,
     width: 68,
     justifyContent: 'center',

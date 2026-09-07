@@ -1,30 +1,29 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { useSelector, useDispatch } from 'react-redux';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
 import { debounce } from 'lodash';
-import BackgroundTimer from 'react-native-background-timer';
+import { SheetManager } from 'react-native-actions-sheet';
 import PostsList from '../../postsList';
 import { PostsTabContentProps } from '../types/tabbedPosts.types';
 import TabEmptyView from './listEmptyView';
-import { showReplyModal } from '../../../redux/actions/uiAction';
-import { PostsListRef } from '../../postsList/container/postsListContainer';
 import {
   useFeedQuery,
   usePromotedPostsQuery,
 } from '../../../providers/queries/postQueries/feedQueries';
-import { NewPostsPopup, ScrollTopPopup } from '../../atoms';
-import { ProposalVoteRequest } from '../..';
-
-let scrollOffset = 0;
-let blockPopup = false;
-const SCROLL_POPUP_THRESHOLD = 5000;
+import { ScrollTopPopup } from '../../atoms';
+import { SheetNames } from '../../../navigation/sheets';
+import {
+  selectIsLoggedIn,
+  selectCurrentAccount,
+  selectIsConnected,
+} from '../../../redux/selectors';
+import { useAppSelector } from '../../../hooks';
+import { ProposalVoteRequest, FeatureSpotlightCard } from '../..';
 
 const PostsTabContent = ({
   filterKey,
   isFeedScreen,
   isInitialTab,
   pageType,
-  forceLoadPosts,
   filterScrollRequest,
   feedUsername,
   tag,
@@ -34,13 +33,11 @@ const PostsTabContent = ({
   handleOnScrollBeginDrag,
 }: PostsTabContentProps) => {
   // redux properties
-  const dispatch = useDispatch();
-  const isLoggedIn = useSelector((state) => state.application.isLoggedIn);
-  const isConnected = useSelector((state) => state.application.isConnected);
-  const currentAccount = useSelector((state) => state.account.currentAccount);
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
+  const isConnected = useAppSelector(selectIsConnected);
+  const currentAccount = useAppSelector(selectCurrentAccount);
 
-  const { username } = currentAccount;
-  const userPinned = currentAccount.about?.profile?.pinned;
+  const username = currentAccount?.name;
 
   // state
   const [sessionUser, setSessionUser] = useState(username);
@@ -48,23 +45,13 @@ const PostsTabContent = ({
   const [curPinned, setCurPinned] = useState(pinnedPermlink);
 
   // refs
-  const postsListRef = useRef<PostsListRef>();
+  const postsListRef = useRef<any>(null);
 
   const sessionUserRef = useRef(sessionUser);
-  const postFetchTimerRef = useRef<any>(null);
-
-  const feedQuery = useFeedQuery({
-    feedUsername,
-    filterKey,
-    tag,
-    cachePage: isInitialTab && isFeedScreen,
-    enableFetchOnAppState: isFeedScreen,
-    pinnedPermlink: curPinned,
-  });
-  const promotedPostsQuery = usePromotedPostsQuery();
-
-  // init state refs;
-  sessionUserRef.current = sessionUser;
+  const blockPopupRef = useRef(false);
+  const blockPopupTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const scrollOffsetRef = useRef(0);
+  const SCROLL_POPUP_THRESHOLD = 5000;
 
   const skipPromotedPosts = useMemo(() => {
     switch (pageType) {
@@ -77,16 +64,29 @@ const PostsTabContent = ({
     }
   }, [pageType]);
 
+  const feedQuery = useFeedQuery({
+    feedUsername,
+    filterKey,
+    tag,
+    cachePage: isInitialTab && isFeedScreen,
+    enableFetchOnAppState: isFeedScreen,
+    pinnedPermlink: curPinned,
+  });
+  const promotedPostsQuery = usePromotedPostsQuery(!skipPromotedPosts);
+
+  // init state refs;
+  sessionUserRef.current = sessionUser;
+
   // side effects
   useEffect(() => {
-    _initContent(feedUsername);
-  }, [tag]);
+    _initContent(feedUsername as any);
+  }, [tag, feedUsername]);
 
   useEffect(() => {
-    if (isConnected && (username !== sessionUser || forceLoadPosts)) {
+    if (isConnected && username !== sessionUser) {
       _initContent(username);
     }
-  }, [username, forceLoadPosts]);
+  }, [username, isConnected, sessionUser]);
 
   useEffect(() => {
     if (filterScrollRequest && filterScrollRequest === filterKey) {
@@ -97,93 +97,134 @@ const PostsTabContent = ({
     }
   }, [filterScrollRequest]);
 
+  // Update pinned post when prop changes (for both own profile and viewing others)
   useEffect(() => {
-    console.log('curPinned change', userPinned);
-    if (pageType === 'ownProfile' && userPinned !== curPinned) {
-      setCurPinned(userPinned);
-      _scrollToTop();
-      feedQuery.refresh();
+    if (pinnedPermlink !== curPinned) {
+      setCurPinned(pinnedPermlink);
+      if (pageType === 'profile' || pageType === 'ownProfile') {
+        _scrollToTop();
+        feedQuery.refresh();
+      }
     }
-  }, [userPinned]);
+  }, [pinnedPermlink, pageType, curPinned]);
 
   const _initContent = (_sessionUsername: string) => {
     _scrollToTop();
     setSessionUser(_sessionUsername);
-
-    if (postFetchTimerRef.current) {
-      BackgroundTimer.clearTimeout(postFetchTimerRef.current);
-      postFetchTimerRef.current = null;
-    }
   };
 
   // view related routines
-  const _onPostsPopupPress = () => {
+  const _onScrollToTopPress = () => {
     _scrollToTop();
-    feedQuery.mergetLatestPosts();
   };
 
   const _scrollToTop = () => {
     postsListRef?.current?.scrollToTop();
     setEnableScrollTop(false);
     scrollPopupDebouce.cancel();
-    blockPopup = true;
-    setTimeout(() => {
-      blockPopup = false;
+    blockPopupRef.current = true;
+
+    // Clear existing timeout
+    if (blockPopupTimeoutRef.current) {
+      clearTimeout(blockPopupTimeoutRef.current);
+    }
+
+    // Set new timeout
+    blockPopupTimeoutRef.current = setTimeout(() => {
+      blockPopupRef.current = false;
+      blockPopupTimeoutRef.current = null;
     }, 1000);
   };
 
-  const _handleOnScroll = () => {
+  const _handleOnScroll = (event: any) => {
     if (handleOnScroll) {
-      handleOnScroll();
+      handleOnScroll(event);
     }
   };
 
-  const _renderHeader = () => {
-    if (isLoggedIn && pageType === 'main' && isInitialTab) {
-      return <ProposalVoteRequest />;
+  const _renderHeader = useMemo(() => {
+    if (pageType === 'main' && isInitialTab) {
+      return (
+        <>
+          {isLoggedIn && <ProposalVoteRequest />}
+          <FeatureSpotlightCard />
+        </>
+      );
     }
-  };
+  }, [isLoggedIn, pageType, isInitialTab, currentAccount?.name]);
+
   // view rendereres
   const _renderEmptyContent = () => {
-    const _isNoPost = !feedQuery.isLoading && feedQuery.data.length == 0;
-    return <TabEmptyView filterKey={filterKey} isNoPost={_isNoPost} />;
+    const _isNoPost = !feedQuery.isLoading && !feedQuery.isError && feedQuery.data.length == 0;
+    return (
+      <TabEmptyView
+        filterKey={filterKey}
+        isNoPost={_isNoPost}
+        isError={feedQuery.isError}
+        error={feedQuery.error}
+        isRetrying={feedQuery.isRefreshing}
+        onRetry={feedQuery.refresh}
+      />
+    );
   };
 
-  const scrollPopupDebouce = debounce(
-    (value) => {
-      setEnableScrollTop(value);
-    },
-    500,
-    { leading: true },
+  const scrollPopupCallback = useCallback((value: boolean) => {
+    setEnableScrollTop(value);
+  }, []);
+
+  const scrollPopupDebouce = useMemo(
+    () => debounce(scrollPopupCallback, 500, { leading: true }),
+    [scrollPopupCallback],
   );
+
+  // Cleanup debounce and timeout on unmount
+  useEffect(() => {
+    return () => {
+      scrollPopupDebouce.cancel();
+      if (blockPopupTimeoutRef.current) {
+        clearTimeout(blockPopupTimeoutRef.current);
+      }
+    };
+  }, [scrollPopupDebouce]);
 
   const _onScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const currentOffset = event.nativeEvent.contentOffset.y;
-    const scrollUp = currentOffset < scrollOffset;
-    scrollOffset = currentOffset;
+    const scrollUp = currentOffset < scrollOffsetRef.current;
+    scrollOffsetRef.current = currentOffset;
 
-    if (scrollUp && !blockPopup && currentOffset > SCROLL_POPUP_THRESHOLD) {
+    if (scrollUp && !blockPopupRef.current && currentOffset > SCROLL_POPUP_THRESHOLD) {
       scrollPopupDebouce(true);
     }
   };
 
-  // show quick reply modal
-  const _showQuickReplyModal = (post: any) => {
-    if (isLoggedIn) {
-      dispatch(showReplyModal({ mode: 'comment', parentPost: post }));
-    } else {
-      // TODO: show proper alert message
-      console.log('Not LoggedIn');
-    }
-  };
+  // show quick reply modal. Memoized so it (and the _handleCardInteraction /
+  // PostCard memo chain that depends on it) stays referentially stable across
+  // renders, only changing when login state changes.
+  const _showQuickReplyModal = useCallback(
+    (post: any) => {
+      if (isLoggedIn) {
+        SheetManager.show(SheetNames.QUICK_POST, {
+          payload: {
+            mode: 'comment',
+            parentPost: post,
+          },
+        });
+      } else {
+        // TODO: show proper alert message
+        console.log('Not LoggedIn');
+      }
+    },
+    [isLoggedIn],
+  );
 
   return (
     <>
       <PostsList
         ref={postsListRef}
         posts={feedQuery.data}
-        isFeedScreen={isFeedScreen}
-        promotedPosts={!skipPromotedPosts ? promotedPostsQuery.data : []}
+        onDeletePost={feedQuery.deletePost}
+        isFeedScreen={!!isFeedScreen}
+        promotedPosts={!skipPromotedPosts ? promotedPostsQuery.data || [] : []}
         onLoadPosts={(shouldReset) => {
           if (shouldReset) {
             feedQuery.refresh();
@@ -202,14 +243,7 @@ const PostsTabContent = ({
         showQuickReplyModal={_showQuickReplyModal}
         ListHeaderComponent={_renderHeader}
       />
-      <NewPostsPopup
-        popupAvatars={feedQuery.latestPosts.map((post) => post.avatar || '')}
-        onPress={_onPostsPopupPress}
-        onClose={() => {
-          feedQuery.resetLatestPosts();
-        }}
-      />
-      <ScrollTopPopup enable={enableScrollTop} onPress={_onPostsPopupPress} />
+      <ScrollTopPopup enable={enableScrollTop} onPress={_onScrollToTopPress} />
     </>
   );
 };

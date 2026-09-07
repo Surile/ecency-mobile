@@ -1,141 +1,160 @@
-import {
-  QueryKey,
-  useMutation,
-  UseMutationOptions,
-  useQueries,
-  useQueryClient,
-} from '@tanstack/react-query';
-import { useState } from 'react';
+import { useInfiniteQuery } from '@tanstack/react-query';
+import { useMemo, useRef } from 'react';
 import { useIntl } from 'react-intl';
-import { unionBy } from 'lodash';
-import bugsnapInstance from '../../config/bugsnag';
-import { useAppDispatch, useAppSelector } from '../../hooks';
+import * as Sentry from '@sentry/react-native';
+import {
+  getNotificationsInfiniteQueryOptions,
+  useMarkNotificationsRead,
+  useSetLastRead,
+} from '@ecency/sdk';
+import { useAppDispatch, useAppSelector, useAuth } from '../../hooks';
 import { updateUnreadActivityCount } from '../../redux/actions/accountAction';
 import { toastNotification } from '../../redux/actions/uiAction';
-import { getNotifications, markNotifications } from '../ecency/ecency';
 import { NotificationFilters } from '../ecency/ecency.types';
-import { markHiveNotifications } from '../hive/dhive';
-import QUERIES from './queryKeys';
+import { getDigitPinCode } from '../hive/hive';
+import { selectCurrentAccount, selectPin } from '../../redux/selectors';
+import { decryptKey } from '../../utils/crypto';
+import { useAuthContext } from '../sdk/useAuthContext';
 
-const FETCH_LIMIT = 20;
+/**
+ * Hook to fetch notifications using SDK's infinite query
+ * Migrated from custom useQueries implementation to SDK's getNotificationsInfiniteQueryOptions
+ * @param filter - Notification filter (undefined for all notifications)
+ */
+export const useNotificationsQuery = (filter?: NotificationFilters) => {
+  const { username, code } = useAuth();
 
-export const useNotificationsQuery = (filter: NotificationFilters) => {
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [pageParams, setPageParams] = useState(['']);
+  // the SDK's page size is fixed; a fourth limit argument was never read
+  const sdkOptions = getNotificationsInfiniteQueryOptions(username, code, filter as any);
 
-  const _fetchNotifications = async (pageParam: string) => {
-    console.log('fetching page since:', pageParam);
-    const response = await getNotifications({ filter, since: pageParam, limit: FETCH_LIMIT });
-    // console.log('new page fetched', response);
-    return response || [];
-  };
-
-  const _getNextPageParam = (lastPage: any[]) => {
-    const lastId = !!lastPage?.length && lastPage[lastPage.length - 1].id;
-    console.log('extracting next page parameter', lastId);
-    return lastId;
-  };
-
-  // query initialization
-  const notificationQueries = useQueries({
-    queries: pageParams.map((pageParam) => ({
-      queryKey: [QUERIES.NOTIFICATIONS.GET, filter, pageParam],
-      queryFn: () => _fetchNotifications(pageParam),
-      initialData: [],
-    })),
+  const infiniteQuery = useInfiniteQuery({
+    ...sdkOptions,
+    enabled: !!username && !!code, // Both are required for notifications
+    staleTime: 30 * 1000, // 30 seconds — fresh enough for notifications
+    gcTime: 10 * 60 * 1000, // 10 minutes
+    maxPages: 10, // Limit to 10 pages (200 items) maximum
   });
 
-  const _lastPage = notificationQueries[notificationQueries.length - 1];
-
-  const _refresh = async () => {
-    setIsRefreshing(true);
-    setPageParams(['']);
-    await notificationQueries[0].refetch();
-    setIsRefreshing(false);
-  };
-
-  const _fetchNextPage = () => {
-    if (!_lastPage || _lastPage.isFetching) {
-      return;
-    }
-
-    const lastId = _getNextPageParam(_lastPage.data);
-    if (lastId && !pageParams.includes(lastId)) {
-      pageParams.push(lastId);
-      setPageParams([...pageParams]);
-    }
-  };
-
-  const _dataArrs = notificationQueries.map((query) => query.data);
+  // Flatten pages into single array for backwards compatibility
+  const data = useMemo(() => {
+    if (!infiniteQuery.data?.pages) return [];
+    // SDK returns pages as arrays directly, not wrapped in { data: [...] }
+    return infiniteQuery.data.pages
+      .flatMap((page: any) => (Array.isArray(page) ? page : page.data || []))
+      .filter((item) => item != null); // Filter out undefined/null items
+  }, [infiniteQuery.data?.pages]);
 
   return {
-    data: unionBy(..._dataArrs, 'id'),
-    isRefreshing,
-    isLoading: _lastPage.isLoading || _lastPage.isFetching,
-    fetchNextPage: _fetchNextPage,
-    refresh: _refresh,
+    data,
+    isRefreshing: infiniteQuery.isRefetching && !infiniteQuery.isFetchingNextPage,
+    isLoading: infiniteQuery.isLoading,
+    isFetching: infiniteQuery.isFetching,
+    isPending: infiniteQuery.isPending,
+    isFetchingNextPage: infiniteQuery.isFetchingNextPage,
+    fetchNextPage: infiniteQuery.fetchNextPage,
+    refresh: infiniteQuery.refetch,
+    hasNextPage: infiniteQuery.hasNextPage,
+    // Only an error when there is nothing to show: a failed "load more" must
+    // not replace the notifications already on screen.
+    isError: infiniteQuery.isError && data.length === 0,
+    error: infiniteQuery.error,
   };
 };
 
+/**
+ * Hook to mark notifications as read
+ * Uses SDK's useMarkNotificationsRead (optimistic cache updates, rollback and
+ * invalidation over the shared query client) and useSetLastRead (on-chain
+ * notify/ecency_notify markers), adding mobile specifics: pin-decrypted access
+ * token, unread badge dispatch and failure toast.
+ */
 export const useNotificationReadMutation = () => {
   const intl = useIntl();
   const dispatch = useAppDispatch();
-  const queryClient = useQueryClient();
+  const { username: authUsername, code: authCode } = useAuth();
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const pinHash = useAppSelector(selectPin);
+  const authContext = useAuthContext();
 
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const pinCode = useAppSelector((state) => state.application.pin);
+  // Get auth credentials
+  const digitPinCode = useMemo(() => (pinHash ? getDigitPinCode(pinHash) : undefined), [pinHash]);
+  const username = currentAccount?.name || authUsername;
 
-  // id is options, if no id is provided program marks all notifications as read;
-  const _mutationFn = async (id?: string) => {
-    try {
-      const response = await markNotifications(id);
-      console.log('Ecency notifications marked as Read', response);
-      if (!id) {
-        await markHiveNotifications(currentAccount, pinCode);
-        console.log('Hive notifications marked as Read');
+  // Track pending mutations to verify on error
+  const pendingMutationRef = useRef<{ id?: string; timestamp: number } | null>(null);
+  const accessToken =
+    currentAccount?.local?.accessToken && digitPinCode
+      ? decryptKey(currentAccount.local.accessToken, digitPinCode)
+      : authCode;
+
+  const mutation = useMarkNotificationsRead(
+    username,
+    accessToken,
+    (unreadCount) => {
+      if (unreadCount !== undefined) {
+        dispatch(updateUnreadActivityCount(unreadCount));
       }
-
-      return response.unread || 0;
-    } catch (err) {
-      bugsnapInstance.notify(err);
-    }
-  };
-
-  const _options: UseMutationOptions<number, unknown, string | undefined, void> = {
-    onMutate: async (notificationId) => {
-      // TODO: find a way to optimise mutations by avoiding too many loops
-      console.log('on mutate data', notificationId);
-
-      // update query data
-      const queriesData: [QueryKey, any[] | undefined][] = queryClient.getQueriesData([
-        QUERIES.NOTIFICATIONS.GET,
-      ]);
-      console.log('query data', queriesData);
-
-      queriesData.forEach(([queryKey, data]) => {
-        if (data) {
-          console.log('mutating data', queryKey);
-          const _mutatedData = data.map((item) => ({
-            ...item,
-            read: !notificationId || notificationId === item.id ? 1 : item.read,
-          }));
-          queryClient.setQueryData(queryKey, _mutatedData);
-        }
-      });
+      pendingMutationRef.current = null;
     },
+    (error) => {
+      const pendingMutation = pendingMutationRef.current;
 
-    onSuccess: async (unreadCount, notificationId) => {
-      console.log('on success data', unreadCount);
-
-      dispatch(updateUnreadActivityCount(unreadCount));
-      if (!notificationId) {
-        queryClient.invalidateQueries([QUERIES.NOTIFICATIONS.GET]);
+      if (pendingMutation && Date.now() - pendingMutation.timestamp < 5000) {
+        pendingMutationRef.current = null;
+        Sentry.captureMessage(
+          'Notification mark-as-read failed but mutation may have succeeded',
+          'warning',
+        );
+        return;
       }
-    },
-    onError: () => {
+      Sentry.captureException(error);
+
       dispatch(toastNotification(intl.formatMessage({ id: 'alert.fail' })));
+      pendingMutationRef.current = null;
     },
-  };
+  );
 
-  return useMutation(_mutationFn, _options);
+  // SDK broadcast mutation for marking Hive on-chain notifications (notify + ecency_notify)
+  const setLastReadMutation = useSetLastRead(username, authContext, 'async');
+
+  // Wrap SDK mutation to add mobile-specific Hive notification marking
+  return {
+    mutate: (notificationId?: string) => {
+      try {
+        // Validate credentials before attempting mutation
+        if (!username || !accessToken) {
+          console.warn('Cannot mark notifications as read: missing credentials');
+          dispatch(toastNotification(intl.formatMessage({ id: 'alert.fail' })));
+          return;
+        }
+
+        // Track this mutation for error verification
+        pendingMutationRef.current = {
+          id: notificationId,
+          timestamp: Date.now(),
+        };
+
+        const payload = notificationId ? { id: notificationId } : {};
+        mutation.mutate(payload);
+
+        // Mobile-specific: Also mark Hive notifications when marking all
+        if (!notificationId) {
+          setLastReadMutation.mutate(
+            {},
+            {
+              onError: (err) => {
+                Sentry.captureException(err);
+              },
+            },
+          );
+        }
+      } catch (error) {
+        Sentry.captureException(error);
+        dispatch(toastNotification(intl.formatMessage({ id: 'alert.fail' })));
+        pendingMutationRef.current = null;
+      }
+    },
+    isPending: mutation.isPending,
+    // Don't expose mutateAsync
+  };
 };

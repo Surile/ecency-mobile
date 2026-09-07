@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { View, Text, ScrollView } from 'react-native';
 import { useIntl } from 'react-intl';
 
@@ -6,6 +6,8 @@ import { useIntl } from 'react-intl';
 import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
 import { TabItem } from 'components/tabbedPosts/types/tabbedPosts.types';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { SheetManager } from 'react-native-actions-sheet';
+import { useNavigation } from '@react-navigation/native';
 import { CollapsibleCard, BasicHeader, TabbedPosts } from '../../../components';
 import { Tag, ProfileSummaryPlaceHolder } from '../../../components/basicUIElements';
 
@@ -15,12 +17,15 @@ import CommunityContainer from '../container/communityContainer';
 import styles from './communityStyles';
 
 import { COMMUNITY_SCREEN_FILTER_MAP, getDefaultFilters } from '../../../constants/options/filters';
+import ROUTES from '../../../constants/routeNames';
+import { SheetNames } from '../../../navigation/sheets';
 import { useAppSelector } from '../../../hooks';
 
-const CommunityScreen = ({ route }) => {
+const CommunityScreen = ({ route }: any) => {
   const tag = route.params?.tag ?? '';
   const filter = route.params?.filter ?? '';
   const intl = useIntl();
+  const navigation = useNavigation();
   const [isExpanded, setIsExpanded] = useState(true);
 
   const communityTabs = useAppSelector(
@@ -61,6 +66,47 @@ const CommunityScreen = ({ route }) => {
     }
   };
 
+  const _handleManagePress = useCallback(
+    async (data: any) => {
+      const result = await SheetManager.show(SheetNames.COMMUNITY_MANAGE);
+
+      // Only a selection carries a known action. Backdrop, swipe and back
+      // dismissals resolve the sheet's payload object instead, so match on the
+      // action rather than on truthiness.
+      const params = {
+        communityId: data?.name || tag,
+        communityTitle: data?.title || '',
+      };
+
+      switch (result?.action) {
+        case 'members':
+          navigation.navigate({
+            name: ROUTES.SCREENS.COMMUNITY_MEMBERS,
+            key: `community_members_${tag}`,
+            params,
+          });
+          break;
+        case 'settings':
+          navigation.navigate({
+            name: ROUTES.SCREENS.COMMUNITY_SETTINGS,
+            key: `community_settings_${tag}`,
+            params,
+          });
+          break;
+        case 'activities':
+          navigation.navigate({
+            name: ROUTES.SCREENS.COMMUNITY_ACTIVITIES,
+            key: `community_activities_${tag}`,
+            params,
+          });
+          break;
+        default:
+          break;
+      }
+    },
+    [navigation, tag],
+  );
+
   return (
     <CommunityContainer tag={tag}>
       {({
@@ -69,13 +115,17 @@ const CommunityScreen = ({ route }) => {
         handleNewPostButtonPress,
         isSubscribed,
         isLoggedIn,
-      }) => (
+        isModerator,
+      }: any) => (
         <SafeAreaView style={styles.container}>
           <BasicHeader
             title={`${data && data.title ? data.title : ''} ${intl.formatMessage({
               id: 'community.community',
             })}`}
             enableViewModeToggle={true}
+            rightIconName={isModerator ? 'shield-account-outline' : undefined}
+            iconType="MaterialCommunityIcons"
+            handleRightIconPress={() => _handleManagePress(data)}
           />
           {data ? (
             <CollapsibleCard
@@ -102,7 +152,7 @@ const CommunityScreen = ({ route }) => {
                   })}`}
                 </Text>
                 <View style={styles.separator} />
-                <View style={{ flexDirection: 'row' }}>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', rowGap: 8 }}>
                   {isLoggedIn && (
                     <Tag
                       style={styles.subscribeButton}
@@ -130,20 +180,41 @@ const CommunityScreen = ({ route }) => {
                     isPin
                     onPress={handleNewPostButtonPress}
                   />
+                  {isLoggedIn && (
+                    <Tag
+                      style={styles.subscribeButton}
+                      value={intl.formatMessage({
+                        id: 'newsletter.community_button',
+                      })}
+                      isFilter
+                      onPress={() =>
+                        SheetManager.show(SheetNames.NEWSLETTER_DIGEST, {
+                          payload: {
+                            type: 'community',
+                            target: data.name,
+                            targetLabel: data.title,
+                          },
+                        })
+                      }
+                    />
+                  )}
                 </View>
               </View>
             </CollapsibleCard>
           ) : (
             <ProfileSummaryPlaceHolder />
           )}
-          <View tabLabel={intl.formatMessage({ id: 'search.posts' })} style={styles.tabbarItem}>
+          <View
+            {...({ tabLabel: intl.formatMessage({ id: 'search.posts' }) } as any)}
+            style={styles.tabbarItem}
+          >
             <TabbedPosts
               key={tag + JSON.stringify(communityTabs)}
               tabFilters={tabFilters}
               selectedOptionIndex={_getSelectedIndex()}
               tag={tag}
               pageType="community"
-              handleOnScrollBeginDrag={isExpanded ? _handleOnScrollBeginDrag : null}
+              handleOnScrollBeginDrag={(isExpanded ? _handleOnScrollBeginDrag : null) as any}
             />
           </View>
         </SafeAreaView>

@@ -8,8 +8,11 @@ import { getMessaging } from '@react-native-firebase/messaging';
 // Services and Actions
 import { useNavigation } from '@react-navigation/native';
 import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
+import { SheetManager } from 'react-native-actions-sheet';
+import { getAccountsQueryOptions, saveNotificationSetting } from '@ecency/sdk';
+import { captureException } from '../../../utils/sentryUtils';
+import { getQueryClient } from '../../../providers/queries';
 import { login, loginWithSC2 } from '../../../providers/hive/auth';
-import { lookupAccounts } from '../../../providers/hive/dhive';
 
 import {
   failedAccount,
@@ -19,8 +22,7 @@ import {
 } from '../../../redux/actions/accountAction';
 import { login as loginAction, setPinCode } from '../../../redux/actions/applicationActions';
 import { setInitPosts, setFeedPosts } from '../../../redux/actions/postsAction';
-import { setPushTokenSaved, setExistUser } from '../../../realm/realm';
-import { setPushToken } from '../../../providers/ecency/ecency';
+import { setPushTokenSaved, setExistUser } from '../../../storage/storage';
 import { decodeBase64, encryptKey } from '../../../utils/crypto';
 
 // Middleware
@@ -34,11 +36,17 @@ import ROUTES from '../../../constants/routeNames';
 import LoginScreen from '../screen/loginScreen';
 import persistAccountGenerator from '../../../utils/persistAccountGenerator';
 import { fetchSubscribedCommunities } from '../../../redux/actions/communitiesAction';
-import { showActionModal } from '../../../redux/actions/uiAction';
 import { UserAvatar } from '../../../components';
 import { useUserActivityMutation } from '../../../providers/queries/pointQueries';
 import { PointActivityIds } from '../../../providers/ecency/ecency.types';
-import bugsnapInstance from '../../../config/bugsnag';
+import { SheetNames } from '../../../navigation/sheets';
+import {
+  selectIsPinCodeOpen,
+  selectIsConnected,
+  selectPrevLoggedInUsers,
+  selectNotificationDetails,
+  selectIsNotificationOpen,
+} from '../../../redux/selectors';
 
 /*
  *            Props Name        Description                                     Value
@@ -46,8 +54,8 @@ import bugsnapInstance from '../../../config/bugsnag';
  *
  */
 
-class LoginContainer extends PureComponent {
-  constructor(props) {
+class LoginContainer extends PureComponent<any, any> {
+  constructor(props: any) {
     super(props);
 
     this.state = {
@@ -69,8 +77,8 @@ class LoginContainer extends PureComponent {
   }
 
   // Component Functions
-  _confirmCodeLogin = (username, code) => {
-    const { dispatch, intl } = this.props;
+  _confirmCodeLogin = (username: any, code: any) => {
+    const { intl } = this.props;
 
     try {
       // check accessCode formatting and compare expiry
@@ -89,8 +97,8 @@ class LoginContainer extends PureComponent {
       }
 
       // Everything is set, show login confirmation
-      dispatch(
-        showActionModal({
+      SheetManager.show(SheetNames.ACTION_MODAL, {
+        payload: {
           title: intl.formatMessage({ id: 'login.deep_login_alert_title' }, { username }),
           body: intl.formatMessage({ id: 'login.deep_login_alert_body' }),
           buttons: [
@@ -105,18 +113,18 @@ class LoginContainer extends PureComponent {
             },
           ],
           headerContent: <UserAvatar username={username} size="xl" />,
-        }),
-      );
+        },
+      });
     } catch (err) {
       console.warn('Failed to login using code', err);
       Alert.alert(
         intl.formatMessage({ id: 'alert.fail' }),
-        intl.formatMessage({ id: err.message }),
+        intl.formatMessage({ id: (err as any).message }),
       );
     }
   };
 
-  _loginWithCode = (code) => {
+  _loginWithCode = (code: any) => {
     const { dispatch, isPinCodeOpen, navigation, intl } = this.props;
     this.setState({ isLoading: true });
     loginWithSC2(code)
@@ -130,17 +138,14 @@ class LoginContainer extends PureComponent {
           dispatch(loginAction(true));
 
           if (isPinCodeOpen) {
-            dispatch(
-              navigation.navigate({
-                accessToken: result.accessToken,
-                navigateTo: ROUTES.DRAWER.MAIN,
-              }),
-            );
-          } else {
             navigation.navigate({
-              name: ROUTES.DRAWER.MAIN,
-              params: { accessToken: result.accessToken },
+              name: ROUTES.SCREENS.PINCODE,
+              params: {
+                navigateTo: ROUTES.DRAWER.MAIN,
+              },
             });
+          } else {
+            navigation.navigate({ name: ROUTES.DRAWER.MAIN });
           }
         } else {
           // TODO: Error alert (Toast Message)
@@ -175,7 +180,7 @@ class LoginContainer extends PureComponent {
     }
   };
 
-  _handleOnPressLogin = (username, password) => {
+  _handleOnPressLogin = (username: any, password: any) => {
     const { dispatch, intl, isPinCodeOpen, navigation, userActivityMutation } = this.props as any;
 
     this.setState({ isLoading: true });
@@ -195,8 +200,8 @@ class LoginContainer extends PureComponent {
           // track user activity for login
           userActivityMutation.mutate({ pointsTy: PointActivityIds.LOGIN });
           setExistUser(true);
-          this._setPushToken(result.name);
-          const encryptedPin = encryptKey(Config.DEFAULT_PIN, Config.PIN_KEY);
+          this._setPushToken(result.name, result.accessToken);
+          const encryptedPin = encryptKey(Config.DEFAULT_PIN!, Config.PIN_KEY!);
           dispatch(setPinCode(encryptedPin));
 
           if (isPinCodeOpen) {
@@ -229,14 +234,14 @@ class LoginContainer extends PureComponent {
         dispatch(failedAccount(err.message));
         this.setState({ isLoading: false });
 
-        bugsnapInstance.notify(err, (event) => {
-          event.context = 'key-login-failure';
-          event.setUser(username);
+        captureException(err, (scope) => {
+          scope.setTag('context', 'key-login-failure');
+          scope.setUser({ username });
         });
       });
   };
 
-  _setPushToken = async (username) => {
+  _setPushToken = async (username: any, accessToken?: string) => {
     const { notificationSettings, notificationDetails } = this.props;
     const notifyTypesConst = {
       vote: 1,
@@ -247,16 +252,30 @@ class LoginContainer extends PureComponent {
       transfers: 6,
       favorite: 13,
       bookmark: 15,
+      tags: 23,
+      delegations: 10,
+      payouts: 19,
+      accountUpdate: 20,
+      weeklyEarnings: 21,
+      scheduledPublished: 22,
     };
-    const notifyTypes = [];
+    const notifyTypes: any[] = [];
 
     Object.keys(notificationDetails).forEach((item) => {
       const notificationType = item.replace('Notification', '');
+      const notifyType = (notifyTypesConst as any)[notificationType];
 
-      if (notificationDetails[item]) {
-        notifyTypes.push(notifyTypesConst[notificationType]);
+      // Only a mapped type: a settings key this map does not know would otherwise
+      // register as null and the device would be told nothing useful about it.
+      if (notificationDetails[item] && notifyType) {
+        notifyTypes.push(notifyType);
       }
     });
+
+    if (!accessToken) {
+      console.warn('Missing access token for notifications:', username);
+      return;
+    }
 
     getMessaging()
       .getToken()
@@ -268,28 +287,37 @@ class LoginContainer extends PureComponent {
           allows_notify: Number(notificationSettings),
           notify_types: notifyTypes,
         };
-        setPushToken(data).then(() => {
-          setPushTokenSaved(true);
-        });
+        return saveNotificationSetting(
+          accessToken,
+          data.username,
+          data.system,
+          data.allows_notify,
+          data.notify_types,
+          data.token,
+        );
+      })
+      .then(() => {
+        setPushTokenSaved(true);
+      })
+      .catch((err) => {
+        console.warn('Failed to register push token', err);
       });
   };
 
-  _getAccountsWithUsername = async (username) => {
-    const { intl, isConnected } = this.props;
+  _getAccountsWithUsername = async (username: any) => {
+    const { isConnected } = this.props;
 
     if (!isConnected) {
       return null;
     }
 
     try {
-      const validUsers = await lookupAccounts(username);
+      const queryClient = getQueryClient();
+      const accounts = await queryClient.fetchQuery(getAccountsQueryOptions([username]));
 
-      return validUsers;
+      return accounts;
     } catch (error) {
-      Alert.alert(
-        intl.formatMessage({ id: 'alert.error' }),
-        intl.formatMessage({ id: 'alert.unknow_error' }),
-      );
+      return null;
     }
   };
 
@@ -318,13 +346,13 @@ class LoginContainer extends PureComponent {
   }
 }
 
-const mapStateToProps = (state) => ({
+const mapStateToProps = (state: any) => ({
   account: state.accounts,
-  notificationDetails: state.application.notificationDetails,
-  notificationSettings: state.application.isNotificationOpen,
-  isConnected: state.application.isConnected,
-  isPinCodeOpen: state.application.isPinCodeOpen,
-  prevLoggedInUsers: state.account.prevLoggedInUsers,
+  notificationDetails: selectNotificationDetails(state),
+  notificationSettings: selectIsNotificationOpen(state),
+  isConnected: selectIsConnected(state),
+  isPinCodeOpen: selectIsPinCodeOpen(state),
+  prevLoggedInUsers: selectPrevLoggedInUsers(state),
 });
 
 const mapHooksToProps = () => ({

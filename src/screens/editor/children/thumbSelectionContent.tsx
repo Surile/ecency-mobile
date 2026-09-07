@@ -32,7 +32,7 @@ const ThumbSelectionContent = ({
   const [thumbIndex, setThumbIndex] = useState(0);
 
   useEffect(() => {
-    const urls = [...extractImageUrls({ body }), ...videoThumbUrls];
+    const urls = [...new Set([...extractImageUrls({ body }), ...videoThumbUrls])];
 
     if (urls.length < 2) {
       setNeedMore(true);
@@ -51,7 +51,8 @@ const ThumbSelectionContent = ({
     } else {
       setThumbIndex(_urlIndex);
     }
-  }, [body]);
+    // join() keeps the dependency stable by value, the parent rebuilds the array each render
+  }, [body, videoThumbUrls.join(','), thumbUrl]);
 
   // VIEW_RENDERERS
   const _renderImageItem = ({ item, index }: { item: string; index: number }) => {
@@ -64,7 +65,12 @@ const ThumbSelectionContent = ({
 
     return (
       <TouchableOpacity onPress={() => _onPress()}>
-        <ExpoImage source={{ uri: item }} style={styles.thumbStyle} contentFit="cover" />
+        <ExpoImage
+          pointerEvents="none"
+          source={{ uri: item }}
+          style={styles.thumbStyle}
+          contentFit="cover"
+        />
         {isSelected && (
           <Animated.View entering={ZoomIn} style={styles.checkContainer}>
             <Icon

@@ -1,85 +1,184 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Text, TouchableWithoutFeedback, View } from 'react-native';
+import { Platform, Text, TouchableWithoutFeedback, View } from 'react-native';
 import Animated, { ZoomIn } from 'react-native-reanimated';
 import { useIntl } from 'react-intl';
-import { get, isArray } from 'lodash';
 import EStyleSheet from 'react-native-extended-stylesheet';
+import { useQuery } from '@tanstack/react-query';
 import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
 import { gestureHandlerRootHOC } from 'react-native-gesture-handler';
+import { Edges, SafeAreaView } from 'react-native-safe-area-context';
+import { PortfolioItem } from 'providers/ecency/ecency.types';
 import styles from '../styles/tokensSelectModa.styles';
 import { useAppDispatch, useAppSelector } from '../../../hooks';
 import { CheckBox, Icon, MainButton, SearchInput } from '../../../components';
-import { AssetBase, CoinData } from '../../../redux/reducers/walletReducer';
+import { AssetBase, ProfileToken, TokenType } from '../../../redux/reducers/walletReducer';
 import DEFAULT_ASSETS from '../../../constants/defaultAssets';
-import { setSelectedCoins } from '../../../redux/actions/walletActions';
+import { setSelectedAssets } from '../../../redux/actions/walletActions';
 import { AssetIcon } from '../../../components/atoms';
-import { profileUpdate } from '../../../providers/hive/dhive';
-import { updateCurrentAccount } from '../../../redux/actions/accountAction';
-
-enum TokenType {
-  ENGINE = 'ENGINE',
-  SPK = 'SPK',
-}
-
-interface ProfileToken {
-  symbol: string;
-  type: TokenType;
-}
+import { useUpdateProfileTokensMutation } from '../../../providers/queries/walletQueries/walletQueries';
+import { walletQueries } from '../../../providers/queries';
+import { selectCurrentAccount } from '../../../redux/selectors';
+import { fetchTokenBalances } from '../../../providers/hive-engine/hiveEngine';
 
 /**
  *  NOTE: using AssetsSelectModal as part of native-stack with modal presentation is important
  *  as GestureResponder do not work as expected when used inside regular Modal on android
  *  */
-const AssetsSelect = ({ navigation }) => {
+type SelectableAsset = PortfolioItem & {
+  isEngine?: boolean;
+  isChain?: boolean;
+  isSectionSeparator?: boolean;
+};
+
+const IconComponent = Icon as any;
+const MainButtonComponent = MainButton as any;
+const SearchInputComponent = SearchInput as any;
+
+const mapAssetLayer = (asset: PortfolioItem | SelectableAsset): SelectableAsset => {
+  if ((asset as SelectableAsset).isSectionSeparator) {
+    return asset as SelectableAsset;
+  }
+
+  const base = asset as PortfolioItem;
+
+  return {
+    ...base,
+    isEngine: (asset as SelectableAsset).isEngine ?? base.layer === 'engine',
+    isChain: (asset as SelectableAsset).isChain ?? base.layer === 'chain',
+  };
+};
+
+const AssetsSelect = ({ navigation }: { navigation: any }) => {
   const dispatch = useAppDispatch();
   const intl = useIntl();
 
-  const coinsData = useAppSelector((state) => state.wallet.coinsData);
-  const selectedCoins: AssetBase[] = useAppSelector((state) => state.wallet.selectedCoins);
-  const pinCode = useAppSelector((state) => state.application.pin);
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const assetsQuery = walletQueries.useAssetsQuery({ onlyEnabled: false });
+  const engineBalancesQuery = useQuery({
+    queryKey: ['assets-select', 'engine-balances', currentAccount?.name || ''],
+    queryFn: () => fetchTokenBalances(currentAccount?.name || ''),
+    enabled: !!currentAccount?.name,
+    staleTime: 60 * 1000,
+  });
 
   const selectionRef = useRef<AssetBase[]>([]);
 
-  const [listData, setListData] = useState<CoinData[]>([]);
-  const [sortedList, setSortedList] = useState([]);
+  const updateProfileTokensMutation = useUpdateProfileTokensMutation();
+
+  const [listData, setListData] = useState<SelectableAsset[]>([]);
+  const [sortedList, setSortedList] = useState<SelectableAsset[]>([]);
   const [query, setQuery] = useState('');
+  const [selectionVersion, setSelectionVersion] = useState(0);
 
   useEffect(() => {
-    selectionRef.current = selectedCoins.filter(
-      (item) => (item.isEngine || item.isSpk) && !!coinsData[item.symbol],
-    );
-    _updateSortedList();
-  }, []);
+    // Initialize selectionRef from profile metadata
+    // Read directly from profile metadata as source of truth
+    const profileTokens = currentAccount?.profile?.tokens;
+
+    if (Array.isArray(profileTokens)) {
+      // Filter profile tokens to only include enabled ones (where meta.show is true or undefined)
+      // HIVE tokens are excluded (they're always enabled by default and shouldn't be in metadata)
+      // Legacy SPK tokens written by old clients are dropped (SPK support removed)
+      const enabledTokens = profileTokens.filter(
+        (token: ProfileToken) =>
+          token.type !== TokenType.HIVE &&
+          String(token.type) !== 'SPK' &&
+          (!token.meta || token.meta.show !== false),
+      );
+
+      // Convert to AssetBase format
+      // Note: We don't filter against assetsQuery.selectedableData because:
+      // - CHAIN tokens (BTC, ETH, etc.) may not be in the Hive portfolio query
+      // - Profile metadata is the source of truth for what's selected
+      const filtered = enabledTokens.map((token: ProfileToken) => ({
+        id: token.symbol,
+        symbol: token.symbol,
+        isEngine: token.type === TokenType.ENGINE,
+        isChain: token.type === TokenType.CHAIN,
+        notCrypto: false,
+      }));
+
+      selectionRef.current = filtered;
+    } else {
+      // No profile tokens, initialize to empty
+      selectionRef.current = [];
+    }
+    // Don't call _updateSortedList() here - Effect 2 will handle it
+    // when it processes assetsQuery.selectedableData
+    setSelectionVersion((v) => v + 1);
+  }, [currentAccount]);
 
   useEffect(() => {
-    const data: CoinData[] = [];
+    const data: SelectableAsset[] = [];
+    const addedSymbols = new Set<string>();
+    const _query = query.toLowerCase();
 
-    Object.keys(coinsData).forEach((key) => {
-      if (coinsData[key].isEngine || coinsData[key].isSpk) {
-        const asset: CoinData = coinsData[key];
-        const _name = asset.name.toLowerCase();
-        const _symbol = asset.symbol.toLowerCase();
-        const _query = query.toLowerCase();
+    // Add tokens from assetsQuery (Hive tokens)
+    assetsQuery.selectedableData?.forEach((asset) => {
+      const _name = asset.name?.toLowerCase() || '';
+      const _symbol = asset.symbol.toLowerCase();
 
-        const _isSelected =
-          selectionRef.current.findIndex((item) => item.symbol === asset.symbol) > -1;
+      const _isSelected =
+        selectionRef.current.findIndex((item) => item.symbol === asset.symbol) > -1;
 
-        if (query === '' || _isSelected || _symbol.includes(_query) || _name.includes(_query)) {
-          data.push(asset);
-        }
+      if (query === '' || _isSelected || _symbol.includes(_query) || _name.includes(_query)) {
+        data.push(mapAssetLayer(asset));
+        addedSymbols.add(asset.symbol);
+      }
+    });
+
+    // Fallback: include engine token symbols from raw engine balances.
+    // This keeps selectable engine assets visible even when portfolio engine metadata fails.
+    engineBalancesQuery.data?.forEach((balance) => {
+      const { symbol } = balance;
+
+      if (!symbol || addedSymbols.has(symbol)) {
+        return;
+      }
+
+      const _symbol = symbol.toLowerCase();
+      const _isSelected = selectionRef.current.findIndex((item) => item.symbol === symbol) > -1;
+
+      if (query === '' || _isSelected || _symbol.includes(_query)) {
+        data.push({
+          symbol,
+          layer: 'engine',
+          isEngine: true,
+          isChain: false,
+        } as SelectableAsset);
+        addedSymbols.add(symbol);
+      }
+    });
+
+    // Add selected tokens from profile that aren't in assetsQuery (engine/chain)
+    // Always include selected tokens regardless of query so they can be deselected
+    selectionRef.current.forEach((selectedAsset) => {
+      if (!addedSymbols.has(selectedAsset.symbol)) {
+        const { isEngine } = selectedAsset;
+        const { isChain } = selectedAsset;
+        const layer = isEngine ? 'engine' : isChain ? 'chain' : undefined;
+
+        data.push({
+          symbol: selectedAsset.symbol,
+          layer,
+          isEngine,
+          isChain,
+        } as SelectableAsset);
       }
     });
 
     setListData(data);
     _updateSortedList({ data });
-  }, [query, coinsData]);
+  }, [query, assetsQuery.selectedableData, engineBalancesQuery.data, selectionVersion]);
 
-  const _updateSortedList = ({ data } = { data: listData }) => {
-    const _data = [...data];
+  const _updateSortedList = ({ data }: { data?: SelectableAsset[] } = { data: listData }) => {
+    const source = data || listData;
+    const _data = source.map(mapAssetLayer);
+    const selection = selectionRef.current || [];
+
     _data.sort((a, b) => {
-      const _getSortingIndex = (e) =>
-        selectionRef.current.findIndex((item) => item.symbol === e.symbol);
+      const _getSortingIndex = (e: SelectableAsset) =>
+        selection.findIndex((item) => item.symbol === e.symbol);
       const _aIndex = _getSortingIndex(a);
       const _bIndex = _getSortingIndex(b);
 
@@ -95,63 +194,58 @@ const AssetsSelect = ({ navigation }) => {
       return 0;
     });
 
-    _data.splice(selectionRef.current.length, 0, { isSectionSeparator: true });
+    // Count only visible selected items to fix separator placement when search filters are active
+    const selectedSymbols = new Set(selection.map((item) => item.symbol));
+    const visibleSelectedCount = _data.filter((item) => selectedSymbols.has(item.symbol)).length;
+    const insertIndex = Math.min(visibleSelectedCount, _data.length);
+    _data.splice(insertIndex, 0, {
+      isSectionSeparator: true,
+    } as SelectableAsset);
 
     setSortedList(_data);
   };
 
-  // migration snippet
-  useEffect(() => {
-    const tokens = currentAccount?.about?.profile?.tokens;
-    if (!tokens) {
-      _updateUserProfile();
-    } else if (!isArray(tokens)) {
-      // means tokens is using old object formation, covert to array
-      const _mapSymbolsToProfileToken = (symbols, type) =>
-        isArray(symbols)
-          ? symbols.map((symbol) => ({
-              symbol,
-              type,
-            }))
-          : [];
+  const _updateUserProfile = async () => {
+    const existingTokens = currentAccount?.profile?.tokens || [];
 
-      _updateUserProfile([
-        ..._mapSymbolsToProfileToken(tokens.engine, TokenType.ENGINE),
-        ..._mapSymbolsToProfileToken(tokens.spk, TokenType.SPK),
-      ]);
-    }
-  }, [currentAccount]);
+    // 1. HIVE tokens should NEVER be in metadata (always enabled by default)
+    // Filter them out if they somehow got added
 
-  const _updateUserProfile = async (assetsData?: ProfileToken[]) => {
+    // 2. Update CHAIN tokens (external tokens) - only update visibility, never create new ones
+    const selectedChainSymbols = selectionRef.current
+      .filter((item) => item.isChain)
+      .map((item) => item.symbol);
+
+    const chainTokens = existingTokens
+      .filter((item: ProfileToken) => item.type === TokenType.CHAIN)
+      .map((item: ProfileToken) => ({
+        ...item,
+        meta: {
+          ...item.meta,
+          show: selectedChainSymbols.includes(item.symbol),
+        },
+      }));
+
+    // 3. Handle ENGINE tokens (user can add/remove)
+    const engineTokens = selectionRef.current
+      .filter((item) => item.isEngine && item.symbol)
+      .map((item) => ({
+        symbol: item.symbol,
+        type: TokenType.ENGINE,
+        meta: {
+          show: true,
+        },
+      }));
+
+    // Final tokens array - HIVE tokens excluded (always enabled by default)
+    // Filter out any tokens with missing required fields
+    const tokens = [...chainTokens, ...engineTokens].filter((token) => token.symbol && token.type);
+
     try {
-      if (!assetsData?.length) {
-        assetsData = selectionRef.current.map((item) => ({
-          symbol: item.symbol,
-          type: item.isEngine ? TokenType.ENGINE : TokenType.SPK,
-        }));
-      }
-
-      // extract a list of tokens with meta entry
-      const assetsWithMeta = currentAccount.about.profile.tokens.filter((item) => !!item.meta);
-
-      const updatedCurrentAccountData = currentAccount;
-      updatedCurrentAccountData.about.profile = {
-        ...updatedCurrentAccountData.about.profile,
-        // make sure entries with meta are preserved
-        tokens: [...assetsData, ...assetsWithMeta],
-      };
-      const params = {
-        ...updatedCurrentAccountData.about.profile,
-      };
-      await profileUpdate(params, pinCode, currentAccount);
-      dispatch(updateCurrentAccount(updatedCurrentAccountData));
-    } catch (err) {
-      Alert.alert(
-        intl.formatMessage({
-          id: 'alert.fail',
-        }),
-        get(err, 'message', err.toString()),
-      );
+      await updateProfileTokensMutation.mutateAsync(tokens);
+      _navigationGoBack();
+    } catch (error) {
+      console.warn('Failed to update profile tokens', error);
     }
   };
 
@@ -160,24 +254,39 @@ const AssetsSelect = ({ navigation }) => {
   };
 
   const _onApply = () => {
-    dispatch(setSelectedCoins([...DEFAULT_ASSETS, ...selectionRef.current]));
+    dispatch(setSelectedAssets([...DEFAULT_ASSETS, ...selectionRef.current]));
     _updateUserProfile(); // update the user profile with updated tokens data
-    _navigationGoBack();
   };
 
-  const _onDragEnd = ({ data, from, to }) => {
-    const totalSel = selectionRef.current.length;
+  const _onDragEnd = ({
+    data,
+    from,
+    to,
+  }: {
+    data: SelectableAsset[];
+    from: number;
+    to: number;
+  }) => {
+    const separatorIndex = data.findIndex((i) => i.isSectionSeparator);
+    const totalSel = separatorIndex >= 0 ? separatorIndex : (selectionRef.current || []).length;
     const item = sortedList[from];
+
+    // Skip if item is section separator or invalid
+    if (!item || item.isSectionSeparator || !item.symbol) {
+      setSortedList(data);
+      return;
+    }
+
+    const isEngine = item.isEngine ?? item.layer === 'engine';
+    const isChain = item.isChain ?? item.layer === 'chain';
 
     const _obj = {
       id: item.symbol,
       symbol: item.symbol,
-      isEngine: item.isEngine || false,
-      isSpk: item.isSpk || false,
+      isEngine,
+      isChain,
       notCrypto: false,
-    };
-
-    console.log('change order', item.symbol, from, to, 'total:', totalSel);
+    } as AssetBase;
 
     if (from >= totalSel && to <= totalSel) {
       // insert in set at to
@@ -214,7 +323,7 @@ const AssetsSelect = ({ navigation }) => {
     );
 
   const _renderOptions = () => {
-    const _renderItem = ({ item, drag }) => {
+    const _renderItem = ({ item, drag }: { item: SelectableAsset; drag: () => void }) => {
       if (item.isSectionSeparator) {
         return _renderSectionSeparator(intl.formatMessage({ id: 'wallet.available_assets' }));
       }
@@ -223,6 +332,9 @@ const AssetsSelect = ({ navigation }) => {
       const index = selectionRef.current.findIndex((selected) => selected.symbol === item.symbol);
       const isSelected = index >= 0;
 
+      const isEngine = item.isEngine ?? item.layer === 'engine';
+      const isChain = item.isChain ?? item.layer === 'chain';
+
       const _onPress = () => {
         if (isSelected) {
           selectionRef.current.splice(index, 1);
@@ -230,8 +342,8 @@ const AssetsSelect = ({ navigation }) => {
           selectionRef.current.push({
             id: key,
             symbol: key,
-            isEngine: item.isEngine || false,
-            isSpk: item.isSpk || false,
+            isEngine,
+            isChain,
             notCrypto: false,
           });
         }
@@ -239,23 +351,27 @@ const AssetsSelect = ({ navigation }) => {
         _updateSortedList();
       };
 
+      const _onCheckToggle = (_val: string, _checked: boolean) => {
+        _onPress();
+      };
+
       return (
         <ScaleDecorator>
           <View style={styles.checkView}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <CheckBox clicked={_onPress} isChecked={isSelected} />
+              <CheckBox value={key} clicked={_onCheckToggle} isChecked={isSelected} />
               <AssetIcon
-                id={item.symbol}
+                {...({ id: item.symbol } as any)}
                 containerStyle={styles.assetIconContainer}
                 iconUrl={item.iconUrl}
-                isEngine={item.isEngine}
-                isSpk={item.isSpk}
+                isEngine={isEngine}
+                isChain={isChain}
                 iconSize={24}
               />
               <Text style={styles.informationText}>{key}</Text>
             </View>
             <TouchableWithoutFeedback onPressIn={drag} style={styles.dragBtnContainer}>
-              <Icon
+              <IconComponent
                 iconType="MaterialCommunityIcons"
                 name="drag-horizontal-variant"
                 color={EStyleSheet.value('$iconColor')}
@@ -270,36 +386,48 @@ const AssetsSelect = ({ navigation }) => {
     return (
       <DraggableFlatList
         containerStyle={styles.scrollContainer}
+        contentContainerStyle={styles.scrollContentContainer}
         data={sortedList}
         extraData={query}
         renderItem={_renderItem}
         onDragEnd={_onDragEnd}
         ListHeaderComponent={_renderHeader}
-        keyExtractor={(item, index) => `token_${item.symbol + index}`}
+        keyExtractor={(item, index) =>
+          item.isSectionSeparator ? `separator_${index}` : `token_${item.symbol}_${index}`
+        }
       />
     );
   };
 
   const _renderContent = () => {
+    // Don't render until data is loaded
+    if (assetsQuery.isLoading || !assetsQuery.selectedableData) {
+      return <View style={styles.modalContainer} />;
+    }
+
     return (
       <View style={styles.modalContainer}>
         {_renderOptions()}
 
         <View style={styles.actionPanel}>
-          <MainButton
+          <MainButtonComponent
             text={intl.formatMessage({ id: 'alert.confirm' })}
             onPress={_onApply}
             textStyle={styles.btnText}
             style={styles.button}
+            isLoading={updateProfileTokensMutation.isPending}
           />
         </View>
       </View>
     );
   };
 
+  // for modals, iOS has its own top safe area handling
+  const _safeAreaEdges: Edges = Platform.select({ ios: [], default: ['top'] });
+
   return (
-    <View style={styles.modalStyle}>
-      <SearchInput
+    <SafeAreaView style={styles.modalStyle} edges={_safeAreaEdges}>
+      <SearchInputComponent
         showClearButton={true}
         placeholder={intl.formatMessage({ id: 'header.search' })}
         onChangeText={setQuery}
@@ -309,7 +437,7 @@ const AssetsSelect = ({ navigation }) => {
         onBackPress={_navigationGoBack}
       />
       {_renderContent()}
-    </View>
+    </SafeAreaView>
   );
 };
 

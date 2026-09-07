@@ -3,7 +3,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 
 import ROUTES from '../constants/routeNames';
 import { BottomTabBar } from '../components';
-import { Feed, Notification, Wallet } from '../screens';
+import { Chats, Feed, Notification, Wallet } from '../screens';
 import Waves from '../screens/waves';
 
 const Tab = createBottomTabNavigator();
@@ -15,6 +15,10 @@ export const BottomTabNavigator = () => {
       backBehavior="initialRoute"
       initialRouteName={ROUTES.TABBAR.FEED}
       screenOptions={{
+        tabBarStyle: {
+          overflow: 'visible',
+          position: 'absolute',
+        },
         headerShown: false,
         tabBarShowLabel: false,
         tabBarActiveTintColor: '#357ce6',
@@ -25,7 +29,7 @@ export const BottomTabNavigator = () => {
         name={ROUTES.TABBAR.FEED}
         component={Feed}
         initialParams={{
-          iconName: 'view-day', // read in bottomTabBarView
+          iconName: 'home-outline', // read in bottomTabBarView (MaterialCommunityIcons)
         }}
       />
 
@@ -33,35 +37,35 @@ export const BottomTabNavigator = () => {
         name={ROUTES.TABBAR.WAVES}
         component={Waves}
         initialParams={{
+          // WAVES renders a custom wavy-dash (〰️) SVG in bottomTabBarView; this
+          // name is only a MaterialCommunityIcons fallback if that override is removed.
           iconName: 'waves', // read in bottomTabBarView
         }}
       />
 
       <Tab.Screen
-        name={ROUTES.TABBAR.POST_BUTTON}
-        component={EmptyScreen}
+        name={ROUTES.TABBAR.CHATS}
+        component={Chats}
         initialParams={{
-          iconName: 'pencil', // read in bottomTabBarView
+          iconName: 'chat-outline', // read in bottomTabBarView (MaterialCommunityIcons)
         }}
       />
 
       <Tab.Screen
         name={ROUTES.TABBAR.WALLET}
-        component={Wallet}
+        component={Wallet as any}
         initialParams={{
-          iconName: 'account-balance-wallet', // read in bottomTabBarView
+          iconName: 'wallet-outline', // read in bottomTabBarView (MaterialCommunityIcons)
         }}
       />
 
       <Tab.Screen
         name={ROUTES.TABBAR.NOTIFICATION}
-        component={Notification}
+        component={Notification as any}
         initialParams={{
-          iconName: 'notifications', // read in bottomTabBarView
+          iconName: 'bell-outline', // read in bottomTabBarView (MaterialCommunityIcons)
         }}
       />
     </Tab.Navigator>
   );
 };
-
-const EmptyScreen = () => null;

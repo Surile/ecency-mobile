@@ -1,101 +1,127 @@
 import React, { Fragment, useState, useEffect, useRef, useMemo } from 'react';
 import { injectIntl } from 'react-intl';
-import { Text, View, ScrollView, Alert } from 'react-native';
+import { Text, View, ScrollView } from 'react-native';
 import { WebView } from 'react-native-webview';
-import get from 'lodash/get';
 import { useQuery } from '@tanstack/react-query';
 import Animated, { BounceIn } from 'react-native-reanimated';
+import {
+  getBoostPlusAccountPricesQueryOptions,
+  getBoostPlusPricesQueryOptions,
+  getPointsQueryOptions,
+} from '@ecency/sdk';
 import { ScaleSlider } from '../../../components';
 import { hsOptions } from '../../../constants/hsOptions';
 
 // Services and Actions
-import { getPointsSummary } from '../../../providers/ecency/ePoint';
-import { getBoostPlusAccount, getBoostPlusPrice } from '../../../providers/ecency/ecency';
 
 // Components
 import { BasicHeader } from '../../../components/basicHeader';
 import { TransferFormItem } from '../../../components/transferFormItem';
 import { MainButton } from '../../../components/mainButton';
-import { DropdownButton } from '../../../components/dropdownButton';
 import { Modal } from '../../../components/modal';
 
 // Styles
 import styles from '../styles/boostPlus.styles';
 import { OptionsModal } from '../../../components/atoms';
-import QUERIES from '../../../providers/queries/queryKeys';
 import RootNavigation from '../../../navigation/rootNavigation';
 import ROUTES from '../../../constants/routeNames';
+import { useAuth } from '../../../hooks';
 
 const BoostPlus = ({
   intl,
   handleOnSubmit,
   redeemType,
   isLoading,
-  accounts,
   currentAccountName,
   balance: _balance,
   SCPath,
   isSCModalOpen,
   handleOnSCModalClose,
-}) => {
-  const [selectedUser, setSelectedUser] = useState('');
+}: any) => {
   const [balance, setBalance] = useState(_balance);
   const [day, setDay] = useState(7);
-  const [price, setPrice] = useState(0);
+  const [price, setPrice] = useState<number | null>(null);
   const [expiryDate, setExpiryDate] = useState<Date | null>(null);
   const [isValid, setIsValid] = useState(false);
 
-  const startActionSheet = useRef(null);
-  const startActionSheetP = useRef(null);
+  const startActionSheet = useRef<any>(null);
+  const startActionSheetP = useRef<any>(null);
 
-  const boostPricesQuery = useQuery([QUERIES.REDEEM.GET_BOOST_PLUS_PRICES], getBoostPlusPrice, {
-    initialData: [],
+  const { code } = useAuth();
+
+  // Use SDK query options directly without overriding
+  const boostPricesQuery = useQuery({
+    ...(getBoostPlusPricesQueryOptions(code as any) as any),
+    enabled: !!code,
   });
 
-  const _boostDays = useMemo(
-    () => boostPricesQuery.data.map((item) => item.duration),
-    [boostPricesQuery.data],
-  );
-  const _boostPrices = useMemo(
-    () => boostPricesQuery.data.map((item) => item.price),
-    [boostPricesQuery.data],
-  );
+  const { boostDays: _boostDays, boostPrices: _boostPrices } = useMemo(() => {
+    if (!boostPricesQuery.data || !Array.isArray(boostPricesQuery.data)) {
+      return { boostDays: [], boostPrices: [] };
+    }
+
+    const normalized = boostPricesQuery.data
+      .map((item) => {
+        const duration = Number(item.duration);
+        const price = Number(item.price);
+        return { duration, price };
+      })
+      .filter((item) => Number.isFinite(item.duration) && Number.isFinite(item.price));
+
+    return {
+      boostDays: normalized.map((item) => item.duration),
+      boostPrices: normalized.map((item) => item.price),
+    };
+  }, [boostPricesQuery.data]);
 
   useEffect(() => {
     setBalance(_balance);
   }, [_balance]);
 
   useEffect(() => {
-    const pr = _boostPrices[_boostDays.indexOf(day)];
-
-    setIsValid(pr <= balance);
-    setPrice(pr);
-  }, [day, balance, boostPricesQuery.data]);
-
-  useEffect(() => {
-    if (selectedUser) {
-      _getUserBalance(selectedUser);
+    if (_boostDays.length > 0 && !_boostDays.includes(day)) {
+      setDay(_boostDays[0]);
     }
 
-    _checkBoostStatus();
-  }, [selectedUser]);
+    const index = _boostDays.indexOf(day);
+    const pr = index >= 0 ? _boostPrices[index] : undefined;
 
-  const _selectedUser = selectedUser || currentAccountName;
+    setIsValid(pr != null && pr <= balance);
+    setPrice(pr ?? null);
+  }, [day, balance, boostPricesQuery.data]);
 
-  // Component Functions
+  const pointsQuery = useQuery({
+    ...getPointsQueryOptions(currentAccountName, 0),
+    enabled: !!currentAccountName,
+  });
 
-  const _checkBoostStatus = async () => {
-    const response = await getBoostPlusAccount(_selectedUser);
-    if (response?.account === _selectedUser) {
-      const expiryDate = new Date(response.expires);
-      if (expiryDate > new Date()) {
-        setExpiryDate(expiryDate);
+  const boostAccountQuery = useQuery({
+    ...(getBoostPlusAccountPricesQueryOptions(currentAccountName, code as any) as any),
+    enabled: !!currentAccountName && !!code,
+  });
+
+  useEffect(() => {
+    if (!pointsQuery.data || pointsQuery.data.points === undefined) {
+      return;
+    }
+    const points = Number(String(pointsQuery.data?.points ?? '').replace(/,/g, ''));
+    const balanceValue = Math.round(points * 1000) / 1000;
+    setBalance(Number.isNaN(balanceValue) ? _balance : balanceValue);
+  }, [pointsQuery.data, _balance]);
+
+  useEffect(() => {
+    const response = boostAccountQuery.data;
+    if ((response as any)?.account === currentAccountName) {
+      const expiry = new Date((response as any).expires);
+      if (expiry > new Date()) {
+        setExpiryDate(expiry);
         return;
       }
     }
-
     setExpiryDate(null);
-  };
+  }, [boostAccountQuery.data, currentAccountName]);
+
+  // Component Functions
 
   const _renderExpiryDetails = () =>
     expiryDate && (
@@ -109,36 +135,14 @@ const BoostPlus = ({
       </Animated.View>
     );
 
-  const _renderDropdown = (accounts, currentAccountName) => (
-    <DropdownButton
-      dropdownButtonStyle={styles.dropdownButtonStyle}
-      rowTextStyle={styles.rowTextStyle}
-      style={styles.dropdown}
-      dropdownStyle={styles.dropdownStyle}
-      textStyle={styles.dropdownText}
-      options={accounts.map((item) => item.username)}
-      defaultText={currentAccountName}
-      selectedOptionIndex={accounts.findIndex((item) => item.username === currentAccountName)}
-      onSelect={(index, value) => {
-        setSelectedUser(value);
-      }}
-    />
+  const _renderDropdown = (accountName: any) => (
+    <Text style={styles.dropdownText}>{accountName}</Text>
   );
 
-  const _getUserBalance = async (username) => {
-    await getPointsSummary(username)
-      .then((userPoints) => {
-        const balance = Math.round(get(userPoints, 'points') * 1000) / 1000;
-        setBalance(balance);
-      })
-      .catch((err) => {
-        Alert.alert(err.message || err.toString());
-      });
-  };
+  // balance is derived from pointsQuery; no manual fetch needed
 
   const _handleOnSubmit = async () => {
-    // TODO: later add support to boost other accounts
-    handleOnSubmit(redeemType, day, _selectedUser, selectedUser);
+    handleOnSubmit(redeemType, day, currentAccountName, currentAccountName);
   };
 
   return (
@@ -149,26 +153,28 @@ const BoostPlus = ({
           <View style={styles.middleContent}>
             <TransferFormItem
               label={intl.formatMessage({ id: 'promote.user' })}
-              rightComponent={() => _renderDropdown(accounts, _selectedUser)}
+              rightComponent={() => _renderDropdown(currentAccountName)}
             />
             <Text style={styles.balanceText}>{`${balance} Points`}</Text>
 
             <View style={styles.total}>
               <Text style={styles.day}>
-                {`${day} ${intl.formatMessage({
+                {`${_boostDays.length > 0 ? day : '--'} ${intl.formatMessage({
                   id: 'promote.days',
                 })} `}
               </Text>
-              <Text style={styles.price}>{`${price} Points  `}</Text>
+              <Text style={styles.price}>{`${price ?? '--'} Points  `}</Text>
             </View>
 
-            <ScaleSlider
-              values={_boostDays}
-              LRpadding={50}
-              activeValue={day}
-              handleOnValueChange={(_day) => setDay(_day)}
-              single
-            />
+            {_boostDays.length > 0 && (
+              <ScaleSlider
+                values={_boostDays}
+                LRpadding={50}
+                activeValue={day}
+                handleOnValueChange={(_day: any) => setDay(_day)}
+                single
+              />
+            )}
           </View>
 
           <View style={styles.bottomContent}>

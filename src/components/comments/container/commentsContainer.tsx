@@ -1,47 +1,41 @@
 import React, { useState, useEffect } from 'react';
-import { Platform } from 'react-native';
 import { connect } from 'react-redux';
 import { injectIntl } from 'react-intl';
 import get from 'lodash/get';
 
-import { postBodySummary } from '@ecency/render-helper';
 import { useNavigation } from '@react-navigation/native';
-import { getComments, deleteComment } from '../../../providers/hive/dhive';
+import { SheetManager } from 'react-native-actions-sheet';
+import { getDiscussionsQueryOptions, useDeleteComment } from '@ecency/sdk';
+import { useQueryClient } from '@tanstack/react-query';
 // Services and Actions
-import { writeToClipboard } from '../../../utils/clipboard';
-import { showProfileModal, toastNotification } from '../../../redux/actions/uiAction';
-
-// Middleware
+import { toastNotification } from '../../../redux/actions/uiAction';
 
 // Constants
 import ROUTES from '../../../constants/routeNames';
 
 // Component
 import CommentsView from '../view/commentsView';
-import { updateCommentCache } from '../../../redux/actions/cacheActions';
-import { CacheStatus } from '../../../redux/reducers/cacheReducer';
 import { postQueries } from '../../../providers/queries';
 import { PostTypes } from '../../../constants/postTypes';
+import { SheetNames } from '../../../navigation/sheets';
+import { selectCurrentAccount, selectIsLoggedIn } from '../../../redux/selectors';
+import { useAuthContext } from '../../../providers/sdk';
 
 const CommentsContainer = ({
   author,
   permlink,
   selectedFilter,
-  currentAccount: { name },
   isOwnProfile,
   fetchPost,
   currentAccount,
-  pinCode,
   comments,
   dispatch,
-  intl,
   commentCount,
   isLoggedIn,
   commentNumber,
   mainAuthor,
   handleOnOptionsPress,
   selectedPermlink,
-  isHideImage,
   isShowSubComments,
   hasManyComments,
   showAllComments,
@@ -55,11 +49,16 @@ const CommentsContainer = ({
   handleOnCommentsLoaded,
   postType,
   handleCommentDelete,
-}) => {
+  onTagPress,
+  onAuthorPress,
+}: any) => {
   const navigation = useNavigation();
   const postsCachePrimer = postQueries.usePostsCachePrimer();
+  const queryClient = useQueryClient();
+  const authContext = useAuthContext();
+  const deleteCommentMutation = useDeleteComment(currentAccount?.name, authContext, 'async');
 
-  const [lcomments, setLComments] = useState([]);
+  const [lcomments, setLComments] = useState<any[]>([]);
   const [propComments, setPropComments] = useState(comments);
 
   useEffect(() => {
@@ -79,13 +78,16 @@ const CommentsContainer = ({
 
   // Component Functions
 
-  const _sortComments = (sortOrder = 'trending', _comments) => {
-    const sortedComments = _comments || lcomments;
+  const _sortComments = (sortOrder = 'trending', _comments?: any) => {
+    const _source = _comments || lcomments;
+    // Guard against non-array inputs (discussion map / undefined) reaching .sort —
+    // was a top Sentry crash ("undefined is not a function").
+    const sortedComments = Array.isArray(_source) ? _source : [];
 
-    const absNegative = (a) => a.net_rshares < 0;
+    const absNegative = (a: any) => a.net_rshares < 0;
 
     const sortOrders = {
-      trending: (a, b) => {
+      trending: (a: any, b: any) => {
         if (absNegative(a)) {
           return 1;
         }
@@ -103,7 +105,7 @@ const CommentsContainer = ({
 
         return 0;
       },
-      reputation: (a, b) => {
+      reputation: (a: any, b: any) => {
         const keyA = get(a, 'author_reputation');
         const keyB = get(b, 'author_reputation');
 
@@ -116,7 +118,7 @@ const CommentsContainer = ({
 
         return 0;
       },
-      votes: (a, b) => {
+      votes: (a: any, b: any) => {
         const keyA = a.active_votes.length;
         const keyB = b.active_votes.length;
 
@@ -129,7 +131,7 @@ const CommentsContainer = ({
 
         return 0;
       },
-      age: (a, b) => {
+      age: (a: any, b: any) => {
         if (absNegative(a)) {
           return 1;
         }
@@ -152,19 +154,22 @@ const CommentsContainer = ({
       },
     };
 
-    sortedComments.sort(sortOrders[sortOrder]);
+    sortedComments.sort((sortOrders as any)[sortOrder]);
 
     return sortedComments;
   };
 
   const _getComments = async () => {
     if (isOwnProfile) {
-      await fetchPost();
+      if (fetchPost) {
+        await fetchPost();
+      }
       if (handleOnCommentsLoaded) {
         handleOnCommentsLoaded();
       }
     } else if (author && permlink && !propComments) {
-      await getComments(author, permlink, name)
+      await queryClient
+        .fetchQuery(getDiscussionsQueryOptions(author, permlink))
         .then((__comments) => {
           // favourable place for merging comment cache
           __comments = _sortComments(selectedFilter, __comments);
@@ -180,18 +185,17 @@ const CommentsContainer = ({
     }
   };
 
-  const _handleOnVotersPress = (activeVotes, content) => {
+  const _handleOnVotersPress = (activeVotes: any, content: any) => {
     navigation.navigate({
       name: ROUTES.SCREENS.VOTERS,
       params: {
-        activeVotes,
         content,
       },
       key: get(content, 'permlink'),
     });
   };
 
-  const _handleOnEditPress = (item) => {
+  const _handleOnEditPress = (item: any) => {
     navigation.navigate({
       name: ROUTES.SCREENS.EDITOR,
       key: `editor_edit_reply_${item.permlink}`,
@@ -199,56 +203,59 @@ const CommentsContainer = ({
         isEdit: true,
         isReply: true,
         post: item,
-        fetchPost: _getComments,
       },
     });
   };
 
-  const _handleDeleteComment = (_permlink, _parent_permlink) => {
-    let filteredComments;
+  const _handleDeleteComment = (
+    _permlink: any,
+    _parent_permlink: any,
+    _parent_author: any,
+    _root_author?: any,
+    _root_permlink?: any,
+  ) => {
     if (postType === PostTypes.WAVE && handleCommentDelete) {
       handleCommentDelete({
         _permlink,
         _parent_permlink,
+        // The container account the wave lives under (hive.flow or
+        // ecency.waves); decides which host the delete is broadcast against.
+        _parent_author,
       });
       return;
     }
-    deleteComment(currentAccount, pinCode, _permlink).then(() => {
-      let deletedItem = null;
-
-      const _applyFilter = (item) => {
-        if (item.permlink === _permlink) {
-          deletedItem = item;
-          return false;
-        }
-        return true;
-      };
-
-      if (lcomments.length > 0) {
-        filteredComments = lcomments.filter(_applyFilter);
-        setLComments(filteredComments);
-      } else {
-        filteredComments = propComments.filter(_applyFilter);
-        setPropComments(filteredComments);
-      }
-
-      // remove cached entry based on parent
-      if (deletedItem) {
-        const cachePath = `${deletedItem.author}/${deletedItem.permlink}`;
-        deletedItem.status = CacheStatus.DELETED;
-        delete deletedItem.updated;
-        dispatch(updateCommentCache(cachePath, deletedItem, { isUpdate: true }));
-      }
-    });
+    deleteCommentMutation
+      .mutateAsync({
+        author: currentAccount?.name,
+        permlink: _permlink,
+        parentAuthor: _parent_author,
+        parentPermlink: _parent_permlink || permlink,
+        rootAuthor: _root_author || author,
+        rootPermlink: _root_permlink || permlink,
+      })
+      .then(() => {
+        // Remove from local state for immediate UI update
+        setLComments((prev) => prev.filter((item) => item.permlink !== _permlink));
+        setPropComments((prev: any) => prev.filter((item: any) => item.permlink !== _permlink));
+      })
+      .catch((err) => {
+        const errorDetail = err?.message ? String(err.message) : String(err);
+        dispatch(toastNotification(`Failed to delete comment: ${errorDetail}`));
+        console.warn('Failed to delete comment', err);
+      });
   };
 
-  const _handleOnUserPress = (username) => {
+  const _handleOnUserPress = (username: any) => {
     if (username) {
-      dispatch(showProfileModal(username));
+      SheetManager.show(SheetNames.QUICK_PROFILE, {
+        payload: {
+          username,
+        },
+      });
     }
   };
 
-  const _openReplyThread = (comment) => {
+  const _openReplyThread = (comment: any) => {
     postsCachePrimer.cachePost(comment);
     navigation.navigate({
       name: ROUTES.SCREENS.POST,
@@ -258,28 +265,6 @@ const CommentsContainer = ({
       },
       key: `${comment.author}/${comment.permlink}`,
     });
-  };
-
-  const _handleOnPressCommentMenu = (index, selectedComment) => {
-    const _showCopiedToast = () => {
-      dispatch(
-        toastNotification(
-          intl.formatMessage({
-            id: 'alert.copied',
-          }),
-        ),
-      );
-    };
-
-    if (index === 0) {
-      writeToClipboard(`https://ecency.com${get(selectedComment, 'url')}`).then(_showCopiedToast);
-    }
-    if (index === 1) {
-      const body = postBodySummary(selectedComment.markdownBody, null, Platform.OS);
-      writeToClipboard(body).then(_showCopiedToast);
-    } else if (index === 2) {
-      _openReplyThread(selectedComment);
-    }
   };
 
   return (
@@ -300,11 +285,9 @@ const CommentsContainer = ({
       isLoggedIn={isLoggedIn}
       fetchPost={fetchPost}
       handleDeleteComment={_handleDeleteComment}
-      handleOnPressCommentMenu={_handleOnPressCommentMenu}
       handleOnOptionsPress={handleOnOptionsPress}
       handleOnUserPress={_handleOnUserPress}
       isOwnProfile={isOwnProfile}
-      isHideImage={isHideImage}
       handleOnVotersPress={_handleOnVotersPress}
       isShowSubComments={isShowSubComments}
       showAllComments={showAllComments}
@@ -315,14 +298,15 @@ const CommentsContainer = ({
       postContentView={postContentView}
       isLoading={isLoading}
       postType={postType}
+      onTagPress={onTagPress}
+      onAuthorPress={onAuthorPress}
     />
   );
 };
 
-const mapStateToProps = (state) => ({
-  isLoggedIn: state.application.isLoggedIn,
-  currentAccount: state.account.currentAccount,
-  pinCode: state.application.pin,
+const mapStateToProps = (state: any) => ({
+  isLoggedIn: selectIsLoggedIn(state),
+  currentAccount: selectCurrentAccount(state),
 });
 
 export default connect(mapStateToProps)(injectIntl(CommentsContainer));

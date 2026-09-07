@@ -1,44 +1,67 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useIntl } from 'react-intl';
-import { ActivityIndicator, SectionList, Text, View, RefreshControl } from 'react-native';
+import { ActivityIndicator, FlatList, Text, View, RefreshControl } from 'react-native';
 // Constants
 
 // Components
 import EStyleSheet from 'react-native-extended-stylesheet';
 import { NotificationLine } from '../..';
-import { ListPlaceHolder } from '../../basicUIElements';
-import { ContainerHeader } from '../../containerHeader';
+import { ListPlaceHolder, QueryErrorRetry } from '../../basicUIElements';
 import { FilterBar } from '../../filterBar';
-
-// Utils
-import { isLastWeek, isThisMonth, isThisWeek } from '../../../utils/time';
 
 // Styles
 import globalStyles from '../../../globalStyles';
 import { useAppSelector } from '../../../hooks';
+import { selectIsDarkTheme } from '../../../redux/selectors';
 import styles from './notificationStyles';
 
+// Each `key` must match a NotificationFilters enum value (passed straight to the
+// notifications query) and have a `notification.filters.<key>` locale string.
+// Labels live under their own `filters` namespace rather than reusing
+// `notification.<key>`: several of those are notification BODY strings
+// (`payouts` is "Payout received: ${amount}", `delegations` is "delegated"), so
+// using them as labels renders template text in the dropdown.
 const FILTERS = [
-  { key: 'activities', value: 'ALL' },
-  { key: 'replies', value: 'REPLIES' },
-  { key: 'mentions', value: 'MENTIONS' },
+  { key: 'activities' },
+  { key: 'replies' },
+  { key: 'mentions' },
+  { key: 'rvotes' },
+  { key: 'follows' },
+  { key: 'reblogs' },
+  { key: 'transfers' },
+  { key: 'delegations' },
+  { key: 'nfavorites' },
+  { key: 'nbookmarks' },
+  { key: 'tags' },
+  { key: 'payouts' },
+  { key: 'scheduled_published' },
+  { key: 'account_updates' },
+  { key: 'weekly_earnings' },
 ];
 
 interface Props {
   notifications: any[];
   isLoading: boolean;
+  isFetching: boolean;
+  /** The list failed and there is nothing cached to show instead. */
+  isError?: boolean;
+  error?: unknown;
   isNotificationRefreshing: boolean;
   globalProps: any;
-  handleOnUserPress: () => void;
+  handleOnUserPress: (username?: string) => void;
   readAllNotification: () => void;
-  getActivities: () => void;
-  changeSelectedFilter: () => void;
+  getActivities: (loadMore?: boolean) => void;
+  changeSelectedFilter: (filter?: string, index?: number) => void;
   navigateToNotificationRoute: () => void;
+  listRef?: React.RefObject<FlatList>;
 }
 
 const NotificationView = ({
   notifications,
   isLoading,
+  isFetching,
+  isError,
+  error,
   isNotificationRefreshing,
   globalProps,
   handleOnUserPress,
@@ -46,28 +69,43 @@ const NotificationView = ({
   getActivities,
   changeSelectedFilter,
   navigateToNotificationRoute,
+  listRef: externalListRef,
 }: Props) => {
   const intl = useIntl();
 
-  const listRef = useRef<SectionList>(null);
+  const internalListRef = useRef<any>(null);
+  const listRef = externalListRef || internalListRef;
 
-  const isDarkTheme = useAppSelector((state) => state.application.isDarkTheme);
+  const isDarkTheme = useAppSelector(selectIsDarkTheme);
   const [selectedIndex, setSelectedIndex] = useState(0);
 
-  const _notifications = useMemo(
-    () => _getSectionedNotifications(notifications, intl),
-    [notifications],
-  );
+  // Prevent onEndReached from firing on mount before user scrolls
+  const onEndReachedCalledDuringMomentum = useRef(true);
 
-  const _handleOnDropdownSelect = async (index) => {
+  const _handleOnDropdownSelect = async (index: any) => {
     const _selectedFilter = FILTERS[index].key;
     setSelectedIndex(index);
     changeSelectedFilter(_selectedFilter, index);
-    listRef.current?.scrollToLocation({ itemIndex: 0, sectionIndex: 0, animated: false });
+    listRef.current?.scrollToOffset({ offset: 0, animated: false });
+    // Reset momentum flag when filter changes to prevent immediate fetch
+    onEndReachedCalledDuringMomentum.current = true;
+  };
+
+  const _handleOnEndReached = () => {
+    // Only trigger load more if user has actually scrolled (momentum began)
+    if (!onEndReachedCalledDuringMomentum.current) {
+      getActivities(true);
+      onEndReachedCalledDuringMomentum.current = true;
+    }
+  };
+
+  const _handleMomentumScrollBegin = () => {
+    // User started scrolling, allow next onEndReached to trigger
+    onEndReachedCalledDuringMomentum.current = false;
   };
 
   const _renderFooterLoading = () => {
-    if (isLoading) {
+    if (isLoading && notifications.length > 0) {
       return (
         <View style={styles.flatlistFooter}>
           <ActivityIndicator color={EStyleSheet.value('$primaryBlue')} animating />
@@ -77,11 +115,33 @@ const NotificationView = ({
     return null;
   };
 
-  const _renderSectionHeader = ({ section: { title, index } }) => (
-    <ContainerHeader hasSeperator={index !== 0} isBoldTitle title={title} key={title} />
-  );
+  // Order matters: the failure is checked before the loading skeleton, because
+  // a query that failed is still `isFetching` for the moment React Query spends
+  // settling it, and before the "no activity" copy, which would otherwise claim
+  // an empty inbox on a request that never arrived.
+  const _renderEmptyComponent = () => {
+    if (isError) {
+      return (
+        <QueryErrorRetry
+          error={error}
+          onRetry={() => getActivities()}
+          isRetrying={isNotificationRefreshing}
+        />
+      );
+    }
 
-  const _renderItem = ({ item }) => (
+    if (isLoading || isFetching || isNotificationRefreshing) {
+      return <ListPlaceHolder />;
+    }
+
+    return (
+      <Text style={globalStyles.hintText}>
+        {intl.formatMessage({ id: 'notification.noactivity' })}
+      </Text>
+    );
+  };
+
+  const _renderItem = ({ item }: any) => (
     <NotificationLine
       notification={item}
       handleOnPressNotification={navigateToNotificationRoute}
@@ -95,11 +155,9 @@ const NotificationView = ({
   return (
     <View style={styles.container}>
       <FilterBar
-        dropdownIconName="arrow-drop-down"
         options={FILTERS.map((item) =>
-          intl.formatMessage({ id: `notification.${item.key}` }).toUpperCase(),
+          intl.formatMessage({ id: `notification.filters.${item.key}` }).toUpperCase(),
         )}
-        defaultText="ALL"
         onDropdownSelect={_handleOnDropdownSelect}
         rightIconName="playlist-add-check"
         rightIconType="MaterialIcons"
@@ -107,23 +165,15 @@ const NotificationView = ({
         onRightIconPress={readAllNotification}
       />
 
-      <SectionList
+      <FlatList
         ref={listRef}
-        sections={_notifications}
-        // data={_notifications}
+        data={notifications}
         keyExtractor={(item, index) => `${item.id}-${index}`}
-        onEndReached={() => getActivities(true)}
+        onEndReached={_handleOnEndReached}
         onEndReachedThreshold={0.3}
+        onMomentumScrollBegin={_handleMomentumScrollBegin}
         ListFooterComponent={_renderFooterLoading}
-        ListEmptyComponent={
-          isNotificationRefreshing ? (
-            <ListPlaceHolder />
-          ) : (
-            <Text style={globalStyles.hintText}>
-              {intl.formatMessage({ id: 'notification.noactivity' })}
-            </Text>
-          )
-        }
+        ListEmptyComponent={_renderEmptyComponent}
         contentContainerStyle={styles.listContentContainer}
         refreshControl={
           <RefreshControl
@@ -136,92 +186,9 @@ const NotificationView = ({
           />
         }
         renderItem={_renderItem}
-        renderSectionHeader={_renderSectionHeader}
       />
     </View>
   );
 };
 
 export default NotificationView;
-
-const _getSectionedNotifications = (notifications: any[], intl: any) => {
-  if (!notifications && notifications.length < 1) {
-    return null;
-  }
-
-  const notificationArray = [
-    {
-      title: intl.formatMessage({
-        id: 'notification.recent',
-      }),
-      data: [],
-    },
-    {
-      title: intl.formatMessage({
-        id: 'notification.yesterday',
-      }),
-      data: [],
-    },
-    {
-      title: intl.formatMessage({
-        id: 'notification.this_week',
-      }),
-      data: [],
-    },
-    {
-      title: intl.formatMessage({
-        id: 'notification.last_week',
-      }),
-      data: [],
-    },
-    {
-      title: intl.formatMessage({
-        id: 'notification.this_month',
-      }),
-      data: [],
-    },
-    {
-      title: intl.formatMessage({
-        id: 'notification.older_then',
-      }),
-      data: [],
-    },
-  ];
-
-  // let sectionIndex = -1;
-  notifications.forEach((item) => {
-    const timeIndex = _getTimeListIndex(item.gk);
-    notificationArray[timeIndex].data.push(item);
-  });
-
-  return notificationArray
-    .filter((item) => item.data.length > 0)
-    .map((item, index) => {
-      item.index = index;
-      return item;
-    });
-};
-
-const _getTimeListIndex = (gk: string) => {
-  if (gk === 'Recent' || gk.match(/\d+\s*hours?/)) {
-    return 0;
-  }
-
-  if (gk === 'Yesterday') {
-    return 1;
-  }
-
-  if (isThisWeek(gk)) {
-    return 2;
-  }
-
-  if (isLastWeek(gk)) {
-    return 3;
-  }
-
-  if (isThisMonth(gk)) {
-    return 4;
-  }
-
-  return 5;
-};

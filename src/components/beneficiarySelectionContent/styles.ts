@@ -1,5 +1,4 @@
 import EStyleSheet from 'react-native-extended-stylesheet';
-import { getBottomSpace } from 'react-native-iphone-x-helper';
 
 export default EStyleSheet.create({
   sheetContent: {
@@ -29,9 +28,6 @@ export default EStyleSheet.create({
     flexGrow: 1,
     textAlign: 'left',
   },
-  listContainer: {
-    paddingBottom: getBottomSpace() + 16,
-  },
   container: {
     paddingVertical: 16,
   },
@@ -60,5 +56,15 @@ export default EStyleSheet.create({
   checkBoxContainer: {
     width: 50,
     marginTop: 12,
+  },
+  supportEcencyContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  supportEcencyLabel: {
+    color: '$primaryBlack',
+    fontSize: 14,
+    marginLeft: 8,
   },
 });

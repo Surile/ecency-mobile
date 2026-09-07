@@ -15,6 +15,7 @@ import { useAppSelector } from '../../../hooks';
 import { MainButton, TextButton } from '../..';
 import ROUTES from '../../../constants/routeNames';
 import { getDaysPassedSince } from '../../../utils/time';
+import { selectCurrentAccount, selectIsLoggedIn } from '../../../redux/selectors';
 
 export enum PollModes {
   LOADING = 0,
@@ -31,7 +32,6 @@ interface PostPoll {
   compactView?: boolean;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export const PostPoll = ({ author, permlink, metadata, initMode, compactView }: PostPoll) => {
   if (metadata.content_type !== ContentType.POLL || !metadata.question) {
     return null;
@@ -40,8 +40,8 @@ export const PostPoll = ({ author, permlink, metadata, initMode, compactView }: 
   const intl = useIntl();
   const navigation = useNavigation();
 
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const isLoggedIn = useAppSelector((state) => state.application.isLoggedIn);
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
 
   const [selection, setSelection] = useState<number[]>([]);
   const [mode, setMode] = useState(initMode || compactView ? PollModes.SELECT : PollModes.LOADING);
@@ -51,21 +51,23 @@ export const PostPoll = ({ author, permlink, metadata, initMode, compactView }: 
 
   const _isModeSelect = mode === PollModes.SELECT;
   const _isInterpretationToken = interpretation === PollPreferredInterpretation.TOKENS;
-  const _isPollAuthor = author === currentAccount?.username;
+  const _isPollAuthor = author === currentAccount?.name;
 
   const pollsQuery = pollQueries.useGetPollQuery(author, permlink, metadata);
-  const votePollMutation = pollQueries.useVotePollMutation(pollsQuery.data);
+  const votePollMutation = pollQueries.useVotePollMutation(pollsQuery.data as any);
   const _accAgeLimit =
     pollsQuery.data?.filter_account_age_days || metadata.filters?.account_age || 0;
 
   const userVote = useMemo(() => {
     if (pollsQuery.data) {
-      return pollsQuery.data.poll_voters.find((voter) => voter.name === currentAccount.username);
+      return (pollsQuery.data as any)?.poll_voters?.find(
+        (voter: any) => voter.name === currentAccount?.name,
+      );
     }
-  }, [pollsQuery.data?.poll_voters, currentAccount.username]);
+  }, [pollsQuery.data?.poll_voters, currentAccount?.name]);
 
   const _expired = useMemo(
-    () => new Date(metadata.end_time * 1000).getTime() < new Date().getTime(),
+    () => new Date(metadata.end_time! * 1000).getTime() < new Date().getTime(),
     [metadata],
   );
 
@@ -80,18 +82,23 @@ export const PostPoll = ({ author, permlink, metadata, initMode, compactView }: 
         : false;
 
     const _noVoteChange =
-      metadata.vote_change !== undefined ? !metadata.vote_change && !!userVote : false;
+      metadata.allow_vote_changes !== undefined
+        ? !metadata.allow_vote_changes && !!userVote
+        : false;
 
     const _previewMode = mode === PollModes.PREVIEW;
 
     return _expired || !isLoggedIn || _noVoteChange || _ageLimitApllies || _previewMode;
   }, [metadata, userVote]);
 
+  const _allowPeeking = !userVote && !metadata.ui_hide_res_until_voted;
+
   useEffect(() => {
     if (!pollsQuery.isLoading) {
       setMode(!!userVote || _expired ? PollModes.RESULT : PollModes.SELECT);
       setInterpretation(
-        pollsQuery.data?.preferred_interpretation || PollPreferredInterpretation.NUMBER_OF_VOTES,
+        (pollsQuery.data?.preferred_interpretation as any) ||
+          PollPreferredInterpretation.NUMBER_OF_VOTES,
       );
     }
   }, [pollsQuery.data, userVote]);
@@ -151,17 +158,19 @@ export const PostPoll = ({ author, permlink, metadata, initMode, compactView }: 
     );
   };
 
-  const _authorPanel = _isPollAuthor && (
+  const _authorPanel = (
     <View style={styles.authorPanel}>
-      <TextButton
-        text={intl.formatMessage({
-          id: _isModeSelect ? 'post_poll.view_stats' : 'post_poll.hide_stats',
-        })}
-        onPress={_handleModeToggle}
-        textStyle={styles.viewVotesBtn}
-      />
+      {(_isPollAuthor || _allowPeeking) && (
+        <TextButton
+          text={intl.formatMessage({
+            id: _isModeSelect ? 'post_poll.view_stats' : 'post_poll.hide_stats',
+          })}
+          onPress={_handleModeToggle}
+          textStyle={styles.viewVotesBtn}
+        />
+      )}
 
-      {!_isModeSelect && (
+      {!_isModeSelect && _isPollAuthor && (
         <TextButton
           text={intl.formatMessage({
             id: _isInterpretationToken ? 'post_poll.interpret_vote' : 'post_poll.interpret_token',
@@ -184,7 +193,12 @@ export const PostPoll = ({ author, permlink, metadata, initMode, compactView }: 
         iconStyle={{ fontSize: 16 }}
         onPress={_handleCastVote}
         text="Vote"
-        isDisable={!selection.length || mode === PollModes.PREVIEW}
+        isDisable={
+          !selection.length ||
+          mode === PollModes.PREVIEW ||
+          pollsQuery.isLoading ||
+          !pollsQuery.data
+        }
       />
     </View>
   );
@@ -203,8 +217,9 @@ export const PostPoll = ({ author, permlink, metadata, initMode, compactView }: 
         loading={pollsQuery.isLoading}
         mode={mode}
         selection={selection}
-        hideVoters={_hideVoters}
+        hideVoters={_hideVoters as any}
         interpretationToken={interpretation === PollPreferredInterpretation.TOKENS}
+        token={pollsQuery.data?.token as any}
         compactView={compactView}
         handleChoiceSelect={_handleChoiceSelect}
         handleVotersPress={_handleVotersPress}

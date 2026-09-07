@@ -35,21 +35,37 @@ export const parseReputation = (input: string | number): number => {
   return Math.floor(reputationLevel);
 };
 
-export const getName = (about) => {
+export const getName = (about: any) => {
+  // Guard against null/undefined
+  if (!about) {
+    return null;
+  }
+  // Handle both formats: { profile: { name: "..." } } or { name: "..." }
   if (about.profile && about.profile.name) {
     return about.profile.name;
   }
-  return null;
-};
-
-export const getAvatar = (about) => {
-  if (about.profile && about.profile.profile_image) {
-    return about.profile.profile_image;
+  if (about.name) {
+    return about.name;
   }
   return null;
 };
 
-export const validateUsername = (username) => {
+export const getAvatar = (about: any) => {
+  // Guard against null/undefined
+  if (!about) {
+    return null;
+  }
+  // Handle both formats: { profile: { profile_image: "..." } } or { profile_image: "..." }
+  if (about.profile && about.profile.profile_image) {
+    return about.profile.profile_image;
+  }
+  if (about.profile_image) {
+    return about.profile_image;
+  }
+  return null;
+};
+
+export const validateUsername = (username: string) => {
   const usernameRegex = /^[a-zA-Z0-9]+$/g;
 
   return usernameRegex.test(username);

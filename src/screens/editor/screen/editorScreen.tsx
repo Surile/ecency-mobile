@@ -5,7 +5,14 @@ import { get, isNull, isEqual } from 'lodash';
 
 // Utils
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { extractMetadata, getWordsCount, makeJsonMetadata } from '../../../utils/editor';
+import { getCommunityQueryOptions } from '@ecency/sdk';
+import {
+  cleanAiTools,
+  collectVideoThumbUrls,
+  extractMetadata,
+  getWordsCount,
+  makeJsonMetadata,
+} from '../../../utils/editor';
 
 // Components
 import {
@@ -16,25 +23,39 @@ import {
   Modal,
 } from '../../../components';
 
-// dhive
-
-import { getCommunity } from '../../../providers/hive/dhive';
+// SDK
+import { getQueryClient } from '../../../providers/queries';
 
 // Styles
 import globalStyles from '../../../globalStyles';
+import RcPrecheckBanner from '../../../components/rcPrecheckBanner';
 import { isCommunity } from '../../../utils/communityValidation';
 
 import styles from './editorScreenStyles';
 import PostOptionsModal from '../children/postOptionsModal';
+import SaveTemplateModal from '../children/saveTemplateModal';
+import { AiToolsMeta, CommunityRole, CommunityTypeId } from '../../../providers/hive/hive.types';
+import { flushPendingEditorWork } from '../../../components/uploadsGalleryModal/mediaInsertQueue';
+import { resolveDraftSaveBody } from '../../../utils/editorDraftBody';
 
-class EditorScreen extends Component {
+class EditorScreen extends Component<any, any> {
+  changeTimer: any;
+
+  // Latest body handed to `_handleFormUpdate`, and whether it is still in flight
+  // (recorded but not yet committed to state). See `resolveDraftSaveBody`.
+  _latestBody: string | undefined;
+
+  _latestBodyPending = false;
+
   /* Props
    * ------------------------------------------------
    *   @prop { type }    name                - Description....
    */
-  postOptionsModalRef = null;
+  postOptionsModalRef: any = null;
 
-  constructor(props) {
+  saveTemplateModalRef: any = null;
+
+  constructor(props: any) {
     super(props);
 
     console.log('reading tags', props.draftPost?.tags, props.tags);
@@ -49,12 +70,16 @@ class EditorScreen extends Component {
         tags: (props.draftPost && props.draftPost.tags) || props.tags || [],
         community: props.community || [],
         isValid: false,
+        // AI-usage disclosure flags, pre-checked when Ecency's own AI tools are used.
+        // Restored from a reopened draft so the disclosure survives save/reopen.
+        aiTools: (props.draftPost && props.draftPost.meta && props.draftPost.meta.ai_tools) || {},
       },
       isCommunitiesListModalOpen: false,
       selectedCommunity: null,
       selectedAccount: null,
       scheduledFor: null,
       draftPostProp: props.draftPost,
+      canPostToCommunity: true,
     };
   }
 
@@ -73,9 +98,12 @@ class EditorScreen extends Component {
     }
   }
 
-  componentDidUpdate(prevProps, prevState) {
-    const { isUploadingProp, communityProp } = this.state;
-    if (prevState.isUploadingProp !== isUploadingProp) {
+  componentDidUpdate(prevProps: any, prevState: any) {
+    const { isUploadingProp, communityProp, selectedCommunity } = this.state;
+    if (
+      prevState.isUploadingProp !== isUploadingProp ||
+      prevState.selectedCommunity !== selectedCommunity
+    ) {
       this._handleFormUpdate();
     }
 
@@ -87,12 +115,19 @@ class EditorScreen extends Component {
 
   componentWillUnmount() {
     const { isEdit } = this.props;
+    // Commit anything the editor is still holding — keystrokes inside the 500ms
+    // debounce, and an upload result queued behind live typing — BEFORE saving.
+    // This runs ahead of every descendant's effect cleanup, so without draining
+    // here the save below would write the body as it was before those landed,
+    // storing an unresolved "Uploading..." placeholder for an image that had in
+    // fact arrived.
+    flushPendingEditorWork();
     if (!isEdit) {
       this._saveDraftToDB();
     }
   }
 
-  static getDerivedStateFromProps(nextProps, prevState) {
+  static getDerivedStateFromProps(nextProps: any, prevState: any) {
     // shoudl update state
     const stateUpdate: any = {};
     console.log('reading tags in derived state', nextProps.draftPost?.tags, nextProps.tags);
@@ -156,7 +191,7 @@ class EditorScreen extends Component {
     });
   };
 
-  _setWordsCount = (content) => {
+  _setWordsCount = (content: any) => {
     const _wordsCount = getWordsCount(content);
     const { wordsCount } = this.state;
 
@@ -190,7 +225,7 @@ class EditorScreen extends Component {
     this._saveDraftToDB();
   };
 
-  _saveCurrentDraft = (fields) => {
+  _saveCurrentDraft = (fields: any) => {
     const { saveCurrentDraft, updateDraftFields } = this.props;
 
     if (this.changeTimer) {
@@ -230,7 +265,7 @@ class EditorScreen extends Component {
     });
   };
 
-  _handleRewardChange = (value) => {
+  _handleRewardChange = (value: any) => {
     const { handleRewardChange } = this.props;
     handleRewardChange(value);
   };
@@ -246,15 +281,53 @@ class EditorScreen extends Component {
     }
   };
 
-  _handleIsFormValid = (bodyText) => {
+  // called from the post options modal after it closes itself; the delay lets
+  // the options formSheet fully dismiss before presenting the name prompt
+  // (iOS cannot present a second native modal while one is still animating out)
+  _handleSaveTemplatePress = () => {
+    setTimeout(() => {
+      if (this.saveTemplateModalRef) {
+        this.saveTemplateModalRef.show();
+      }
+    }, 500);
+  };
+
+  _handleSaveAsTemplate = (templateName: any) => {
+    const { saveAsTemplate } = this.props;
+    const { fields } = this.state;
+
+    if (saveAsTemplate && (fields.title || fields.body)) {
+      saveAsTemplate(fields, templateName);
+    }
+  };
+
+  _checkCanPostToCommunity = () => {
+    const { selectedCommunity } = this.state;
+    const { isReply } = this.props;
+
+    switch (selectedCommunity?.type_id) {
+      case CommunityTypeId.JOURNEL: // only members can post, guests can comment
+        return isReply || selectedCommunity.context.role !== CommunityRole.GUEST;
+      case CommunityTypeId.COUNCIL: // only members can post to council
+        return selectedCommunity.context.role !== CommunityRole.GUEST;
+      default:
+        return true;
+    }
+  };
+
+  _handleIsFormValid = (bodyText?: any) => {
     const { fields } = this.state;
     const { isReply, isLoggedIn } = this.props;
     let isFormValid;
 
+    // check for post permission based on community membership and type_id
+    const canPostToCommunity = this._checkCanPostToCommunity();
+
     if (isReply) {
-      isFormValid = get(fields, 'body').length > 0;
+      isFormValid = canPostToCommunity && get(fields, 'body').length > 0;
     } else {
       isFormValid =
+        canPostToCommunity &&
         get(fields, 'title', '') &&
         get(fields, 'title', '').length < 255 &&
         (get(fields, 'body', '') || (bodyText && bodyText > 0)) &&
@@ -262,10 +335,22 @@ class EditorScreen extends Component {
         get(fields, 'tags', null).length <= 10 &&
         isLoggedIn;
     }
-    this.setState({ isFormValid });
+    this.setState({ isFormValid, canPostToCommunity });
   };
 
-  _handleFormUpdate = async (componentID, content) => {
+  // Records that an Ecency AI tool was used, pre-checking the AI-usage disclosure. The flag
+  // rides on state.fields.aiTools and is read at publish time. Additive only -- Ecency never
+  // un-discloses on the user's behalf.
+  _handleAiToolUsed = (key: keyof AiToolsMeta) => {
+    this.setState((prevState: any) => ({
+      fields: {
+        ...prevState.fields,
+        aiTools: { ...(prevState.fields.aiTools || {}), [key]: true },
+      },
+    }));
+  };
+
+  _handleFormUpdate = async (componentID?: any, content?: any) => {
     const { handleFormChanged, thumbUrl, rewardType, getBeneficiaries, postDescription } =
       this.props;
     const { fields: _fields } = this.state;
@@ -273,6 +358,11 @@ class EditorScreen extends Component {
 
     if (componentID === 'body') {
       fields.body = content;
+      // Recorded before the awaits below so the unmount save is not limited to what
+      // has already reached state; marked pending until it lands there, so a body
+      // replaced afterwards by a clear or a late draft load is not overridden by it.
+      this._latestBody = content;
+      this._latestBodyPending = true;
     } else if (componentID === 'title') {
       fields.title = content;
     } else if (componentID === 'tag-area') {
@@ -292,6 +382,10 @@ class EditorScreen extends Component {
       description: postDescription,
     });
     const jsonMeta = makeJsonMetadata(meta, fields.tags);
+    const _aiTools = cleanAiTools(fields.aiTools);
+    if (_aiTools) {
+      jsonMeta.ai_tools = _aiTools;
+    }
     fields.meta = jsonMeta;
 
     if (
@@ -306,12 +400,22 @@ class EditorScreen extends Component {
       this._saveCurrentDraft(fields);
     }
 
-    this.setState({ fields }, () => {
-      this._handleIsFormValid();
-    });
+    // Merge aiTools from the latest state (not the snapshot taken before the awaits above),
+    // so a concurrent _handleAiToolUsed functional update isn't clobbered by this object set.
+    this.setState(
+      (prev: any) => ({ fields: { ...fields, aiTools: prev.fields.aiTools } }),
+      () => {
+        // Only the update that recorded the current value clears the flag, so a
+        // newer body still in flight keeps its precedence.
+        if (componentID === 'body' && this._latestBody === content) {
+          this._latestBodyPending = false;
+        }
+        this._handleIsFormValid();
+      },
+    );
   };
 
-  _handleOnTagAdded = async (tags) => {
+  _handleOnTagAdded = async (tags: any) => {
     const { currentAccount } = this.props;
 
     if (tags.length > 0) {
@@ -331,7 +435,7 @@ class EditorScreen extends Component {
     });
   };
 
-  _handleChangeTitle = (text) => {
+  _handleChangeTitle = (text: any) => {
     const { fields: _fields } = this.state;
 
     _fields.title = text.replace('\n', ' ');
@@ -341,7 +445,7 @@ class EditorScreen extends Component {
     });
   };
 
-  _handlePressCommunity = (community) => {
+  _handlePressCommunity = (community: any) => {
     const { fields, selectedCommunity } = this.state;
     const { currentAccount } = this.props;
 
@@ -366,23 +470,29 @@ class EditorScreen extends Component {
     });
   };
 
-  _getCommunity = (hive) => {
-    getCommunity(hive)
-      .then((community) => {
-        this.setState({ selectedCommunity: community });
-      })
-      .catch((error) => {
-        console.log(error);
-      });
+  _getCommunity = async (hive: any) => {
+    const { currentAccount } = this.props;
+    try {
+      const queryClient = getQueryClient();
+      const community = await queryClient.fetchQuery(
+        getCommunityQueryOptions(hive, currentAccount.name),
+      );
+      this.setState({ selectedCommunity: community });
+    } catch (error) {
+      console.log(error);
+    }
   };
 
   _saveDraftToDB(saveAsNew?: boolean) {
     const { saveDraftToDB } = this.props;
     const { fields } = this.state;
 
+    const _body = resolveDraftSaveBody(fields.body, this._latestBody, this._latestBodyPending);
+    const _fields = _body === fields.body ? fields : { ...fields, body: _body };
+
     // save draft only if any of field is valid
-    if (fields.body || fields.title) {
-      saveDraftToDB(fields, saveAsNew);
+    if (_fields.body || _fields.title) {
+      saveDraftToDB(_fields, saveAsNew);
     }
   }
 
@@ -396,6 +506,7 @@ class EditorScreen extends Component {
       selectedCommunity,
       selectedAccount,
       scheduledFor,
+      canPostToCommunity,
     } = this.state;
     const {
       paramFiles,
@@ -420,10 +531,15 @@ class EditorScreen extends Component {
       sharedSnippetText,
       onLoadDraftPress,
       thumbUrl,
+      videoThumbs,
+      handleVideoThumb,
       uploadProgress,
       rewardType,
       postDescription,
       setIsUploading,
+      getBeneficiaries,
+      getPollDraft,
+      hasExplicitBeneficiaries,
     } = this.props;
 
     const rightButtonText = intl.formatMessage({
@@ -458,7 +574,7 @@ class EditorScreen extends Component {
     return (
       <SafeAreaView edges={['top']} style={globalStyles.defaultContainer}>
         <BasicHeader
-          handleSchedulePress={(date) => handleSchedulePress(date, fields)}
+          handleSchedulePress={(date: any) => handleSchedulePress(date, fields)}
           handleRewardChange={handleRewardChange}
           handleOnBackPress={handleOnBackPress}
           handleOnPressPreviewButton={this._handleOnPressPreviewButton}
@@ -479,16 +595,30 @@ class EditorScreen extends Component {
           handleSettingsPress={this._handleSettingsPress}
         />
         {/* <PostForm
-            handleFormUpdate={this._handleFormUpdate}
+            handleFormUpdate={this._handleFormUpdate as any}
             handleBodyChange={this._setWordsCount}
           isFormValid={isFormValid}
           isPreviewActive={isPreviewActive}
         > */}
         <Fragment>
+          <RcPrecheckBanner
+            username={currentAccount?.name}
+            fields={fields}
+            post={post}
+            isReply={isReply}
+            isEdit={isEdit}
+            thumbUrl={thumbUrl}
+            videoThumbUrls={collectVideoThumbUrls({ videoThumbs, body: fields?.body })}
+            pollDraft={getPollDraft && getPollDraft()}
+            rewardType={rewardType}
+            beneficiaries={getBeneficiaries && getBeneficiaries()}
+            hasExplicitBeneficiaries={hasExplicitBeneficiaries}
+          />
           {!isReply && !isEdit && (
             <SelectCommunityAreaView
               selectedAccount={selectedAccount}
               selectedCommunity={selectedCommunity}
+              canPostToCommunity={canPostToCommunity}
               // because of the bug in react-native-modal
               // https://github.com/facebook/react-native/issues/26892
               onPressOut={() => this.setState({ isCommunitiesListModalOpen: true })}
@@ -515,13 +645,15 @@ class EditorScreen extends Component {
             onTagChanged={this._handleOnTagAdded}
             onTitleChanged={this._handleChangeTitle}
             getCommunity={this._getCommunity}
-            handleFormUpdate={this._handleFormUpdate}
+            handleFormUpdate={this._handleFormUpdate as any}
+            handleAiToolUsed={this._handleAiToolUsed}
             handleBodyChange={this._setWordsCount}
             autoFocusText={autoFocusText}
             sharedSnippetText={sharedSnippetText}
             onLoadDraftPress={onLoadDraftPress}
             uploadProgress={uploadProgress}
             setIsUploading={setIsUploading}
+            handleVideoThumb={handleVideoThumb}
             isPreviewActive={isPreviewActive}
           />
         </Fragment>
@@ -529,10 +661,13 @@ class EditorScreen extends Component {
         {_renderCommunityModal()}
 
         <PostOptionsModal
-          ref={(componentRef) => (this.postOptionsModalRef = componentRef)}
+          ref={(componentRef) => {
+            this.postOptionsModalRef = componentRef;
+          }}
           body={fields.body}
           draftId={draftId}
           thumbUrl={thumbUrl}
+          videoThumbUrls={collectVideoThumbUrls({ videoThumbs, body: fields.body })}
           isEdit={isEdit}
           isCommunityPost={selectedCommunity !== null}
           rewardType={rewardType}
@@ -543,7 +678,16 @@ class EditorScreen extends Component {
           handleRewardChange={this._handleRewardChange}
           handleScheduleChange={this._handleScheduleChange}
           handleShouldReblogChange={handleShouldReblogChange}
-          handleFormUpdate={this._handleFormUpdate}
+          handleFormUpdate={this._handleFormUpdate as any}
+          canSaveTemplate={!isReply && !isEdit && !!(fields.title || fields.body)}
+          handleSaveTemplatePress={this._handleSaveTemplatePress}
+        />
+
+        <SaveTemplateModal
+          ref={(componentRef) => {
+            this.saveTemplateModalRef = componentRef;
+          }}
+          onSave={this._handleSaveAsTemplate}
         />
       </SafeAreaView>
     );

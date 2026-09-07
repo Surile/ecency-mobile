@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 
 // Components
+import { View } from 'react-native';
 import { Image as ExpoImage } from 'expo-image';
 import { useNavigation } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -10,18 +11,20 @@ import styles from '../styles/postScreen.styles';
 // Component
 import { postQueries, usePlausibleTracker } from '../../../providers/queries';
 import ROUTES from '../../../constants/routeNames';
+import { isWavesHost } from '../../../constants/waves';
 import { useAppSelector } from '../../../hooks';
+import { selectCurrentAccount } from '../../../redux/selectors';
 
-const PostScreen = ({ route }) => {
+const PostScreen = ({ route }: any) => {
   const params = route.params || {};
   const tracker = usePlausibleTracker();
   const navigation = useNavigation();
 
   // // refs
   const isNewPost = useRef(route.params?.isNewPost).current;
-  const postOptionsModalRef = useRef<typeof PostOptionsModal | null>(null);
+  const postOptionsModalRef = useRef<any>(null);
 
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
+  const currentAccount = useAppSelector(selectCurrentAccount);
 
   const [author, setAuthor] = useState(params.content?.author || params.author);
   const [permlink, setPermlink] = useState(params.content?.permlink || params.permlink);
@@ -40,7 +43,7 @@ const PostScreen = ({ route }) => {
   });
 
   const isWavePost = useMemo(
-    () => getPostQuery.data?.parent_author === 'ecency.waves',
+    () => isWavesHost(getPostQuery.data?.parent_author),
     [getPostQuery.data],
   ); // TODO: implement a better generic way to avoid parent fetching for waves
 
@@ -70,13 +73,14 @@ const PostScreen = ({ route }) => {
         setParentPermlink(post.parent_permlink);
       }
 
-      setIsOwnPost(currentAccount.username === post.author);
+      const nextIsOwnPost = currentAccount.name === post.author;
+      setIsOwnPost(nextIsOwnPost);
     }
-  }, [getPostQuery.data]);
+  }, [getPostQuery.data, currentAccount.name, isWavePost, tracker.recordEvent]);
 
   // // Component Functions
   const _loadPost = async (_author = null, _permlink = null) => {
-    if (_author && _permlink && _author !== author && _permlink !== _permlink) {
+    if (_author && _permlink && (_author !== author || _permlink !== permlink)) {
       setAuthor(_author);
       setPermlink(_permlink);
     }
@@ -93,7 +97,7 @@ const PostScreen = ({ route }) => {
 
   const _onEditPress = () => {
     if (getPostQuery.data) {
-      const isReply = parentAuthor;
+      const isReply = !!parentAuthor;
 
       navigation.navigate({
         name: ROUTES.SCREENS.EDITOR,
@@ -102,9 +106,8 @@ const PostScreen = ({ route }) => {
           isEdit: true,
           isReply,
           post: getPostQuery.data,
-          fetchPost: _loadPost,
         },
-      } as never);
+      });
     }
   };
 
@@ -115,14 +118,16 @@ const PostScreen = ({ route }) => {
     handleRightIconPress: _onEditPress,
   };
 
-  const _postOptionsBtn = (
-    <IconButton
-      iconStyle={styles.optionsIcon}
-      iconType="MaterialCommunityIcons"
-      name="dots-vertical"
-      onPress={_onPostOptionsBtnPress}
-      size={24}
-    />
+  const _headerRightComponent = (
+    <View style={styles.headerRight}>
+      <IconButton
+        iconStyle={styles.optionsIcon}
+        iconType="MaterialCommunityIcons"
+        name="dots-horizontal"
+        onPress={_onPostOptionsBtnPress}
+        size={24}
+      />
+    </View>
   );
 
   return (
@@ -131,7 +136,7 @@ const PostScreen = ({ route }) => {
         isHasDropdown={true}
         title="Post"
         content={getPostQuery.data}
-        dropdownComponent={_postOptionsBtn}
+        dropdownComponent={_headerRightComponent}
         isNewPost={isNewPost}
         {..._editIconProps}
       />
@@ -151,6 +156,10 @@ const PostScreen = ({ route }) => {
         ref={postOptionsModalRef}
         isWave={isWavePost}
         isVisibleTranslateModal={isSubPost}
+        // This modal is only opened from the header dropdown, which always acts on the post
+        // this screen *is*, so deleting it has to pop. Comments rendered below come with their
+        // own modal and their own onDelete.
+        popScreenOnDelete={true}
       />
     </SafeAreaView>
   );

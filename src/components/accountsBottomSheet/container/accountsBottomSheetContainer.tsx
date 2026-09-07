@@ -1,9 +1,12 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useDispatch } from 'react-redux';
 
 import { useIntl } from 'react-intl';
 import { Alert } from 'react-native';
-import RootNavigation from '../../../navigation/rootNavigation';
+import { SheetManager } from 'react-native-actions-sheet';
+import { getMutedUsersQueryOptions, getNotificationsUnreadCountQueryOptions } from '@ecency/sdk';
+import RootNavigation, { NavigateOptions } from '../../../navigation/rootNavigation';
+import { NavigateArgs, RouteName } from '../../../navigation/types';
 
 import { setPrevLoggedInUsers, updateCurrentAccount } from '../../../redux/actions/accountAction';
 
@@ -12,48 +15,49 @@ import {
   refreshSCToken,
   switchAccount,
 } from '../../../providers/hive/auth';
-import { getUserDataWithUsername } from '../../../realm/realm';
+import { getUserDataWithUsername } from '../../../storage/storage';
 
-import {
-  logout,
-  showActionModal,
-  toggleAccountsBottomSheet,
-} from '../../../redux/actions/uiAction';
+import { logout } from '../../../redux/actions/uiAction';
 import AccountsBottomSheet from '../view/accountsBottomSheetView';
 
 // Constants
 import AUTH_TYPE from '../../../constants/authType';
-import { getDigitPinCode, getMutes } from '../../../providers/hive/dhive';
+import { getDigitPinCode } from '../../../providers/hive/hive';
+import { getQueryClient } from '../../../providers/queries';
 
 import { useAppSelector } from '../../../hooks';
+import {
+  selectCurrentAccount,
+  selectPin,
+  selectIsLoggedIn,
+  selectOtherAccounts,
+  selectPrevLoggedInUsers,
+} from '../../../redux/selectors';
 import { getPointsSummary } from '../../../providers/ecency/ePoint';
-import { getUnreadNotificationCount } from '../../../providers/ecency/ecency';
 import { clearSubscribedCommunitiesCache } from '../../../redux/actions/cacheActions';
 import { fetchSubscribedCommunities } from '../../../redux/actions/communitiesAction';
 import { decryptKey } from '../../../utils/crypto';
 import { repairUserAccountData } from '../../../utils/migrationHelpers';
 import ROUTES from '../../../constants/routeNames';
+import { SheetNames } from '../../../navigation/sheets';
 
 const AccountsBottomSheetContainer = () => {
   const intl = useIntl();
   const dispatch = useDispatch();
-  const accountsBottomSheetViewRef = useRef();
 
-  const isVisibleAccountsBottomSheet = useAppSelector(
-    (state) => state.ui.isVisibleAccountsBottomSheet,
-  );
-  const currentAccount = useAppSelector((state) => state.account.currentAccount);
-  const accounts = useAppSelector((state) => state.account.otherAccounts);
-  const pinHash = useAppSelector((state) => state.application.pin);
-  const prevLoggedInUsers = useAppSelector((state) => state.account.prevLoggedInUsers);
-  const isLoggedIn = useAppSelector((state) => state.application.isLoggedIn);
+  const accountsBottomSheetViewRef = useRef<any>(null);
+
+  const currentAccount = useAppSelector(selectCurrentAccount);
+  const accounts = useAppSelector(selectOtherAccounts);
+  const pinHash = useAppSelector(selectPin);
+  const prevLoggedInUsers = useAppSelector(selectPrevLoggedInUsers);
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
+  const [isSwitching, setIsSwitching] = useState(false);
 
   useEffect(() => {
-    if (isVisibleAccountsBottomSheet) {
-      accountsBottomSheetViewRef.current?.showAccountsBottomSheet();
-      _checkPrevLoggedInUsersList();
-    }
-  }, [isVisibleAccountsBottomSheet]);
+    accountsBottomSheetViewRef.current?.showAccountsBottomSheet();
+    _checkPrevLoggedInUsersList();
+  }, []);
 
   // checks if prevLoggedInUsers do not contain any invalid value and filters the array from invalid data
   const _checkPrevLoggedInUsersList = () => {
@@ -63,21 +67,16 @@ const AccountsBottomSheetContainer = () => {
     }
   };
 
-  const _navigateToRoute = (name: string, params: any) => {
-    dispatch(toggleAccountsBottomSheet(false));
+  const _navigateToRoute = <K extends RouteName>(...[name, params]: NavigateArgs<K>) => {
+    SheetManager.hide(SheetNames.ACCOUNTS_SHEET);
     accountsBottomSheetViewRef.current?.closeAccountsBottomSheet();
     if (name) {
-      RootNavigation.navigate({ name, params });
+      // Correlated by the generic at the call site; TS cannot re-derive that pairing here.
+      RootNavigation.navigate({ name, params } as NavigateOptions);
     }
   };
 
-  const _onClose = () => {
-    dispatch(toggleAccountsBottomSheet(false));
-  };
-
-  const _switchAccount = async (account = {}) => {
-    dispatch(toggleAccountsBottomSheet(false));
-    accountsBottomSheetViewRef.current?.closeAccountsBottomSheet();
+  const _switchAccount = async (account: any = {}) => {
     if (currentAccount && account && account.username !== currentAccount.name) {
       _handleSwitch(account);
     }
@@ -88,11 +87,17 @@ const AccountsBottomSheetContainer = () => {
   };
 
   const _checkHiveAuthExpiry = (authData: any) => {
-    if (authData?.username) {
+    if (
+      authData?.username &&
+      authData.authType === AUTH_TYPE.HIVE_AUTH &&
+      authData.hiveAuthExpiry &&
+      typeof authData.hiveAuthExpiry === 'number' &&
+      authData.hiveAuthExpiry > 0
+    ) {
       const curTime = new Date().getTime();
       if (curTime > authData.hiveAuthExpiry) {
-        dispatch(
-          showActionModal({
+        SheetManager.show(SheetNames.ACTION_MODAL, {
+          payload: {
             title: intl.formatMessage({ id: 'alert.warning' }),
             body: intl.formatMessage({ id: 'alert.auth_expired' }),
             buttons: [
@@ -113,34 +118,26 @@ const AccountsBottomSheetContainer = () => {
                 },
               },
             ],
-          }),
-        );
+          },
+        });
       }
     }
   };
 
-  const _handleSwitch = async (switchingAccount = {}) => {
+  const _handleSwitch = async (switchingAccount: any = {}) => {
     try {
+      setIsSwitching(true);
       const accountData = accounts.filter(
-        (account) => account.username === switchingAccount.username,
+        (account: any) => account.username === switchingAccount.username,
       )[0];
 
-      // if account data has persistet content use that first
-      // to avoid lag
-      if (accountData.name) {
-        accountData.username = accountData.name;
-        dispatch(updateCurrentAccount(accountData));
-      }
-
       // fetch upto data account data nd update current account;
-      let _currentAccount = await switchAccount(accountData.username);
+      let _currentAccount: any = await switchAccount(accountData.username);
       let realmData = await getUserDataWithUsername(accountData.username);
-
-      _currentAccount.username = _currentAccount.name;
 
       if (!realmData[0]) {
         realmData = await repairUserAccountData(
-          _currentAccount.username,
+          _currentAccount.name,
           dispatch,
           intl,
           accounts,
@@ -153,7 +150,7 @@ const AccountsBottomSheetContainer = () => {
 
       [_currentAccount.local] = realmData;
 
-      if (currentAccount.local.authType === AUTH_TYPE.HIVE_AUTH) {
+      if (_currentAccount.local.authType === AUTH_TYPE.HIVE_AUTH) {
         _checkHiveAuthExpiry(_currentAccount.local);
       }
 
@@ -178,26 +175,36 @@ const AccountsBottomSheetContainer = () => {
 
       _currentAccount.local.accessToken = encryptedAccessToken;
 
-      const accessToken = decryptKey(encryptedAccessToken, getDigitPinCode(pinHash));
-      _currentAccount.unread_activity_count = await getUnreadNotificationCount(accessToken);
-      _currentAccount.pointsSummary = await getPointsSummary(_currentAccount.username);
-      _currentAccount.mutes = await getMutes(_currentAccount.username);
+      const queryClient = getQueryClient();
+      const accessToken = decryptKey(encryptedAccessToken, getDigitPinCode(pinHash)) ?? '';
+      _currentAccount.unread_activity_count = await queryClient.fetchQuery(
+        getNotificationsUnreadCountQueryOptions(_currentAccount.name, accessToken),
+      );
+      _currentAccount.pointsSummary = await getPointsSummary(_currentAccount.name);
+
+      // Fetch muted users using SDK query
+      _currentAccount.mutes = await queryClient.fetchQuery(
+        getMutedUsersQueryOptions(_currentAccount.name),
+      );
 
       dispatch(updateCurrentAccount(_currentAccount));
       dispatch(clearSubscribedCommunitiesCache());
-      dispatch(fetchSubscribedCommunities(_currentAccount.username));
+      dispatch(fetchSubscribedCommunities(_currentAccount.name) as any);
     } catch (error) {
       Alert.alert(
         intl.formatMessage({
           id: 'alert.fail',
         }),
-        error.message,
+        (error as any).message,
         [
           { text: intl.formatMessage({ id: 'side_menu.logout' }), onPress: () => _logout() },
           { text: intl.formatMessage({ id: 'alert.cancel' }), style: 'destructive' },
         ],
       );
     }
+    setIsSwitching(false);
+    SheetManager.hide(SheetNames.ACCOUNTS_SHEET);
+    accountsBottomSheetViewRef.current?.closeAccountsBottomSheet();
   };
 
   return (
@@ -207,10 +214,10 @@ const AccountsBottomSheetContainer = () => {
       currentAccount={currentAccount}
       navigateToRoute={_navigateToRoute}
       switchAccount={_switchAccount}
-      onClose={_onClose}
       prevLoggedInUsers={prevLoggedInUsers}
       dispatch={dispatch}
       isLoggedIn={isLoggedIn}
+      isSwitching={isSwitching}
     />
   );
 };

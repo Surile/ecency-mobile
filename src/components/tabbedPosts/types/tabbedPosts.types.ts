@@ -5,28 +5,30 @@ export interface TabItem {
 
 export interface TabbedPostsProps {
   tabFilters: TabItem[];
-  isFeedScreen: boolean;
-  feedUsername: string;
+  isFeedScreen?: boolean;
+  feedUsername?: string;
   selectedOptionIndex: number;
   pageType: 'main' | 'community' | 'profile' | 'ownProfile';
-  tag: string;
-  forceLoadPosts: boolean;
+  // absent on profile pages; the container falls back to ''
+  tag?: string;
+  // optional: the feed screen omits it; the tab content guards the callback
+  onChangeTab?: (event: any) => void;
   tabContentOverrides?: Map<number, any>;
   pinnedPermlink?: string;
-  handleOnScroll: () => void;
+  handleOnScroll?: (event?: any) => void;
+  handleOnScrollBeginDrag?: any;
 }
 
 export interface PostsTabContentProps {
   filterKey: string;
-  isFeedScreen: boolean;
+  isFeedScreen?: boolean;
   isInitialTab: boolean;
   pageType: 'main' | 'profile' | 'ownProfile' | 'community';
-  feedUsername: string;
+  feedUsername?: string;
   tag: string;
-  forceLoadPosts: boolean;
-  filterScrollRequest: string;
+  filterScrollRequest?: string | null;
   pinnedPermlink?: string;
   onScrollRequestProcessed: () => void;
-  handleOnScroll: () => void;
+  handleOnScroll: (event?: any) => void;
   handleOnScrollBeginDrag?: () => void;
 }

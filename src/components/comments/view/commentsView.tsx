@@ -1,18 +1,18 @@
-import React, { useState, Fragment, useRef } from 'react';
+import React, { Fragment, useRef } from 'react';
 import { Text } from 'react-native';
-import { FlashList } from '@shopify/flash-list';
 import get from 'lodash/get';
 import { useIntl } from 'react-intl';
+import EStyleSheet from 'react-native-extended-stylesheet';
 
 // Components
-import EStyleSheet from 'react-native-extended-stylesheet';
-import { Comment, TextButton, UpvotePopover } from '../..';
+import { FlashList } from '@shopify/flash-list';
+import { Comment, PostOptionsModal, TextButton, UpvotePopover } from '../..';
+import { PostHtmlInteractionHandler } from '../../postHtmlRenderer';
 
 // Styles
 import styles from './commentStyles';
-import { OptionsModal } from '../../atoms';
 import { PostTypes } from '../../../constants/postTypes';
-import { PostHtmlInteractionHandler } from '../../postHtmlRenderer';
+import { isWavesHost } from '../../../constants/waves';
 
 const CommentsView = ({
   avatarSize,
@@ -23,12 +23,10 @@ const CommentsView = ({
   fetchPost,
   handleDeleteComment,
   handleOnEditPress,
-  handleOnPressCommentMenu,
   handleOnReplyPress,
   handleOnUserPress,
   handleOnVotersPress,
   hasManyComments,
-  isHideImage,
   isLoggedIn,
   isShowSubComments,
   mainAuthor,
@@ -43,23 +41,40 @@ const CommentsView = ({
   postContentView,
   isLoading,
   postType,
-}) => {
-  const [selectedComment, setSelectedComment] = useState(null);
+  onTagPress,
+  onAuthorPress,
+}: any) => {
   const intl = useIntl();
-  const commentMenu = useRef<any>();
-  const upvotePopoverRef = useRef();
-  const postInteractionRef = useRef(null);
+  // Surfaces that pass `handleOnOptionsPress` (waves) route to their own sheet.
+  // Everywhere else used to fall back to a four-item menu with no delete, edit,
+  // report or moderation action; it now gets the same sheet the post detail
+  // screen uses.
+  const postOptionsModalRef = useRef<any>(null);
+  const upvotePopoverRef = useRef<any>(null);
+  const postInteractionRef = useRef<any>(null);
 
-  const _openCommentMenu = (item) => {
+  const _openCommentMenu = (item: any) => {
     if (handleOnOptionsPress) {
       handleOnOptionsPress(item);
-    } else if (commentMenu.current) {
-      setSelectedComment(item);
-      commentMenu.current.show();
+    } else if (postOptionsModalRef.current) {
+      postOptionsModalRef.current.show(item);
     }
   };
 
-  const _openReplyThread = (item) => {
+  // Without this the sheet falls back to its own delete, which calls
+  // navigation.goBack() and would pop the profile or bot-comments screen the
+  // list is embedded in. It would also skip the in-place list removal and, on
+  // waves, the container's wave-specific delete path.
+  const _handleDeleteFromMenu = (item: any) =>
+    handleDeleteComment(
+      item.permlink,
+      item.parent_permlink,
+      item.parent_author,
+      item.root_author,
+      item.root_permlink,
+    );
+
+  const _openReplyThread = (item: any) => {
     if (item && openReplyThread) {
       openReplyThread(item);
     }
@@ -71,15 +86,9 @@ const CommentsView = ({
     }
   };
 
-  const _onMenuItemPress = (index) => {
-    handleOnPressCommentMenu(index, selectedComment);
-    setSelectedComment(null);
-  };
-
-  const _onUpvotePress = ({ content, sourceRef, showPayoutDetails, onVotingStart }) => {
+  const _onUpvotePress = ({ content, sourceRef, showPayoutDetails, onVotingStart }: any) => {
     if (upvotePopoverRef.current) {
-      const postType =
-        content.parent_author === 'ecency.waves' ? PostTypes.WAVE : PostTypes.COMMENT;
+      const postType = isWavesHost(content.parent_author) ? PostTypes.WAVE : PostTypes.COMMENT;
 
       upvotePopoverRef.current.showPopover({
         sourceRef,
@@ -90,13 +99,6 @@ const CommentsView = ({
       });
     }
   };
-
-  const menuItems = [
-    intl.formatMessage({ id: 'post.copy_link' }),
-    intl.formatMessage({ id: 'post.copy_text' }),
-    intl.formatMessage({ id: 'post.open_thread' }),
-    intl.formatMessage({ id: 'alert.cancel' }),
-  ];
 
   if (!hideManyCommentsButton && hasManyComments) {
     return (
@@ -109,7 +111,7 @@ const CommentsView = ({
     );
   }
 
-  const _renderItem = ({ item }) => {
+  const _renderItem = ({ item }: any) => {
     return (
       <Comment
         mainAuthor={mainAuthor}
@@ -129,16 +131,18 @@ const CommentsView = ({
         handleLinkPress={postInteractionRef.current?.handleLinkPress}
         handleVideoPress={postInteractionRef.current?.handleVideoPress}
         handleYoutubePress={postInteractionRef.current?.handleYoutubePress}
-        isHideImage={isHideImage}
+        handleParaSelection={postInteractionRef.current?.handleParaSelection}
         isLoggedIn={isLoggedIn}
         showAllComments={showAllComments}
         isShowSubComments={isShowSubComments}
         marginLeft={marginLeft}
-        handleOnLongPress={() => _openCommentMenu(item)}
+        handleOnMenuPress={() => _openCommentMenu(item)}
         openReplyThread={() => _openReplyThread(item)}
         onUpvotePress={_onUpvotePress}
         fetchedAt={fetchedAt}
         incrementRepliesCount={incrementRepliesCount}
+        onTagPress={onTagPress}
+        onAuthorPress={onAuthorPress}
       />
     );
   };
@@ -168,9 +172,9 @@ const CommentsView = ({
   return (
     <Fragment>
       <FlashList
-        contentContainerStyle={{ padding: 0, ...styles.list, ...styleOerride }}
+        contentContainerStyle={{ padding: 0, ...styleOerride }}
         data={comments}
-        keyExtractor={(item) => item.author + item.permlink}
+        keyExtractor={(item: any) => item.author + item.permlink}
         renderItem={_renderItem}
         ListEmptyComponent={_renderEmptyContent()}
         ListHeaderComponent={postContentView}
@@ -183,12 +187,11 @@ const CommentsView = ({
         {...flatListProps}
       />
       {!handleOnOptionsPress && (
-        <OptionsModal
-          ref={commentMenu}
-          options={menuItems}
-          title={get(selectedComment, 'summary')}
-          cancelButtonIndex={3}
-          onPress={_onMenuItemPress}
+        <PostOptionsModal
+          ref={postOptionsModalRef}
+          isVisibleTranslateModal={true}
+          onOpenThread={_openReplyThread}
+          onDelete={_handleDeleteFromMenu}
         />
       )}
       <UpvotePopover ref={upvotePopoverRef} />

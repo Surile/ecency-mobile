@@ -5,6 +5,7 @@ import Highlighter from 'react-native-highlight-words';
 
 import EStyleSheet from 'react-native-extended-stylesheet';
 import { UserAvatar } from '../../../userAvatar';
+import { ProBadge } from '../../../proBadge';
 import styles from './userListItemStyles';
 
 const UserListItem = ({
@@ -32,13 +33,13 @@ const UserListItem = ({
   rightTooltipText,
   leftItemRenderer,
   rightItemRenderer,
-}) => {
-  const popoverRef = useRef();
+}: any) => {
+  const popoverRef = useRef<any>(null);
   const [showPopover, setShowPopover] = useState(false);
 
   const _handleRightButtonPress = () => {
     if (onPressRightText) {
-      const _data = {};
+      const _data: any = {};
       _data.following = username;
       onPressRightText(_data);
     }
@@ -55,17 +56,25 @@ const UserListItem = ({
         {!!itemIndex && <Text style={styles.itemIndex}>{itemIndex}</Text>}
         <UserAvatar noAction={true} style={styles.avatar} username={username} />
         <View style={styles.userDescription}>
-          {!searchValue && <Text style={styles.name}>{text || username}</Text>}
+          {!searchValue && (
+            <View style={styles.nameRow}>
+              <Text style={styles.name}>{text || username}</Text>
+              <ProBadge username={username} />
+            </View>
+          )}
           {!!searchValue && !!text && (
-            <Highlighter
-              highlightStyle={{
-                backgroundColor: EStyleSheet.value('$darkGrayBackground'),
-                color: EStyleSheet.value('$white'),
-              }}
-              searchWords={[searchValue]}
-              textToHighlight={text || username}
-              style={styles.name}
-            />
+            <View style={styles.nameRow}>
+              <Highlighter
+                highlightStyle={{
+                  backgroundColor: EStyleSheet.value('$darkGrayBackground'),
+                  color: EStyleSheet.value('$white'),
+                }}
+                searchWords={[searchValue]}
+                textToHighlight={text}
+                style={styles.name}
+              />
+              <ProBadge username={username} />
+            </View>
           )}
           {!!searchValue && !!description && (
             <Highlighter
@@ -97,7 +106,6 @@ const UserListItem = ({
           </View>
         )}
 
-        {rightItemRenderer && rightItemRenderer()}
         {isHasRightItem &&
           isLoggedIn &&
           (isLoadingRightAction ? (
@@ -133,7 +141,7 @@ const UserListItem = ({
 
               <Popover
                 popoverStyle={styles.popoverDetails}
-                arrowStyle={styles.arrow}
+                {...({ arrowStyle: styles.arrow } as any)}
                 backgroundStyle={styles.overlay}
                 isVisible={showPopover}
                 onRequestClose={() => setShowPopover(false)}
@@ -144,6 +152,7 @@ const UserListItem = ({
               </Popover>
             </>
           ))}
+        {rightItemRenderer && rightItemRenderer()}
       </View>
     </TouchableOpacity>
   );

@@ -34,6 +34,7 @@ const DraftListItemView = ({
   isFormatedDate,
   status,
   isSchedules,
+  isTemplate,
   isDeleting,
   isUnsaved,
   handleOnClonePressed,
@@ -42,9 +43,9 @@ const DraftListItemView = ({
   handleLongPress,
   isSelected,
   batchSelectionActive,
-}) => {
-  const actionSheet = useRef(null);
-  const moveActionSheet = useRef(null);
+}: any) => {
+  const actionSheet = useRef<any>(null);
+  const moveActionSheet = useRef<any>(null);
   const [deleteRequested, setIsDeleteRequested] = useState(false);
   const [cloneRequested, setIsCloneRequested] = useState(false);
 
@@ -128,7 +129,7 @@ const DraftListItemView = ({
                 />
               </PopoverWrapper>
             )}
-            {!isSchedules && (
+            {!isSchedules && !isTemplate && (
               <IconButton
                 backgroundColor="transparent"
                 name="copy"
@@ -201,7 +202,9 @@ const DraftListItemView = ({
           intl.formatMessage({ id: 'alert.delete' }),
           intl.formatMessage({ id: 'alert.cancel' }),
         ]}
-        title={intl.formatMessage({ id: 'alert.remove_alert' })}
+        title={intl.formatMessage({
+          id: isTemplate ? 'templates.delete_confirm' : 'alert.remove_alert',
+        })}
         cancelButtonIndex={1}
         destructiveButtonIndex={0}
         onPress={(index) => {
@@ -237,4 +240,32 @@ const DraftListItemView = ({
   );
 };
 
-export default injectIntl(DraftListItemView);
+export default React.memo(injectIntl(DraftListItemView), (prev, next) => {
+  return (
+    prev.draftItem?._id === next.draftItem?._id &&
+    prev.draftItem?.modified === next.draftItem?.modified &&
+    prev.isSelected === next.isSelected &&
+    prev.isDeleting === next.isDeleting &&
+    prev.isCloning === next.isCloning &&
+    prev.batchSelectionActive === next.batchSelectionActive &&
+    prev.intl?.locale === next.intl?.locale &&
+    prev.title === next.title &&
+    prev.summary === next.summary &&
+    prev.mainTag === next.mainTag &&
+    prev.username === next.username &&
+    prev.reputation === next.reputation &&
+    prev.created === next.created &&
+    prev.image === next.image &&
+    prev.isFormatedDate === next.isFormatedDate &&
+    prev.status === next.status &&
+    prev.isSchedules === next.isSchedules &&
+    prev.isTemplate === next.isTemplate &&
+    prev.isUnsaved === next.isUnsaved &&
+    prev.id === next.id &&
+    prev.handleOnPressItem === next.handleOnPressItem &&
+    prev.handleOnRemoveItem === next.handleOnRemoveItem &&
+    prev.handleOnMovePress === next.handleOnMovePress &&
+    prev.handleOnClonePressed === next.handleOnClonePressed &&
+    prev.handleLongPress === next.handleLongPress
+  );
+});

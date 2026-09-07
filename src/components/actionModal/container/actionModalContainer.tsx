@@ -1,9 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React from 'react';
 import { AlertButton } from 'react-native';
 import { ImageSource } from 'expo-image';
-import { useSelector, useDispatch } from 'react-redux';
-import { hideActionModal } from '../../../redux/actions/uiAction';
-import ActionModalView, { ActionModalRef } from '../view/actionModalView';
+import { SheetManager, SheetProps } from 'react-native-actions-sheet';
+import ActionModalView from '../view/actionModalView';
+import { SheetNames } from '../../../navigation/sheets';
 
 export enum ButtonTypes {
   CANCEL = 'cancel',
@@ -11,45 +11,35 @@ export enum ButtonTypes {
   SKIP = 'skip',
 }
 interface ExtendedAlertButton extends AlertButton {
-  textId: string;
+  textId?: string;
   type?: ButtonTypes;
+  returnValue?: string;
 }
 
-export interface ActionModalData {
+export interface ActionModalPayload {
   title: string;
-  body: string;
+  body?: string;
   para?: string;
-  buttons: ExtendedAlertButton[];
+  buttons?: ExtendedAlertButton[];
   headerImage?: ImageSource;
-  onClosed: () => void;
+  onClosed?: () => void;
   headerContent?: React.ReactNode;
   bodyContent?: React.ReactNode;
 }
 
-const ActionModalContainer = () => {
-  const dispatch = useDispatch();
-  const actionModalRef = useRef<ActionModalRef>();
-
-  const actionModalVisible = useSelector((state) => state.ui.actionModalVisible);
-  const actionModalData: ActionModalData = useSelector((state) => state.ui.actionModalData);
-
-  const [modalToken, setModalToken] = useState(0);
-
-  useEffect(() => {
-    if (actionModalVisible && actionModalVisible !== modalToken) {
-      actionModalRef.current?.showModal();
-      setModalToken(actionModalVisible);
+const ActionModalContainer = ({ payload }: SheetProps<SheetNames.ACTION_MODAL>) => {
+  const _onClose = (returnValue?: string) => {
+    if (payload?.onClosed) {
+      payload.onClosed();
     }
-  }, [actionModalVisible]);
-
-  const _onClose = () => {
-    if (actionModalData.onClosed) {
-      actionModalData.onClosed();
-    }
-    dispatch(hideActionModal());
+    SheetManager.hide(SheetNames.ACTION_MODAL, { payload: returnValue });
   };
 
-  return <ActionModalView ref={actionModalRef} onClose={_onClose} data={actionModalData} />;
+  if (!payload) {
+    return null;
+  }
+
+  return <ActionModalView onClose={_onClose} data={payload} />;
 };
 
 export default ActionModalContainer;

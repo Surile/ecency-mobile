@@ -8,17 +8,33 @@ import * as operationsData from './operations.json';
  * Returns boolean if uri starts with 'hive://'
  * */
 
-export const isHiveUri = (uri: string) => {
+export const normalizeHiveUri = (uri: string) => {
   const trimUri = uri.trim();
-  return trimUri.startsWith('hive://');
+  const lowerCaseUri = trimUri.toLowerCase();
+  if (lowerCaseUri.startsWith('ecency://sign/')) {
+    return `hive://${trimUri.slice('ecency://'.length)}`;
+  }
+
+  return trimUri;
 };
+
+export const isHiveUri = (uri: string) => {
+  const normalizedUri = normalizeHiveUri(uri);
+  return normalizedUri.startsWith('hive://');
+};
+
+/**
+ * checks if a url uses an http(s) scheme, i.e. can be loaded inside a WebView.
+ * Non-web schemes (mailto:, tel:, etc.) must be delegated to the OS instead.
+ */
+export const isWebUrl = (url: string) => /^https?:\/\//i.test(url.trim());
 
 // check operation array is valid and is a single operation array
 const _checkOpsArray = (ops: any) => {
   return ops && isArray(ops) && ops.length === 1 && isArray(ops[0]) && ops[0].length === 2;
 };
 
-const findParentKey = (obj, value, parentKey = null) => {
+const findParentKey = (obj: any, value: any, parentKey: string | null = null): string | null => {
   // eslint-disable-next-line no-restricted-syntax
   for (const key in obj) {
     if (obj[key] === value) {
@@ -35,7 +51,7 @@ const findParentKey = (obj, value, parentKey = null) => {
 
 // get operation name and signer field from operation object
 const getOperationProps = (opName: string) => {
-  const op = get(operationsData, opName, null);
+  const op: any = get(operationsData, opName, null);
   if (op) {
     const signerField = findParentKey(op, '__signer');
     return {
@@ -114,10 +130,10 @@ export const getFormattedTx = (tx: any, authoritiesMap: Map<string, boolean>) =>
       return Promise.reject(errorObj);
     }
   }
-  const opSignerValue = get(op[1], opProps.signerField, '');
+  const opSignerValue = get(op[1], opProps.signerField as string, '');
   // if signer field contains empty value, fill it with __signer
   if (!opSignerValue) {
-    operationObj[opProps.signerField] = '__signer';
+    operationObj[opProps.signerField as string] = '__signer';
   }
 
   const { opName } = opProps;

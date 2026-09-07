@@ -26,8 +26,8 @@ export default EStyleSheet.create({
     fontSize: 34,
     fontWeight: '700',
   } as TextStyle,
-  textHeaderChange: {
-    color: '$primaryDarkText',
+  textHeaderApr: {
+    color: '$iconColor',
     fontSize: 16,
     marginBottom: 32,
   } as TextStyle,
@@ -132,6 +132,13 @@ export default EStyleSheet.create({
     marginVertical: 16,
   } as ViewStyle,
 
+  activitiesPlaceholder: {
+    color: '$primaryDarkText',
+    fontSize: 14,
+    textAlign: 'center',
+    paddingVertical: 24,
+  } as TextStyle,
+
   delegationsModal: {
     flex: 1,
     backgroundColor: '$primaryBackgroundColor',
@@ -149,5 +156,20 @@ export default EStyleSheet.create({
   eyeIcon: {
     color: '$iconColor',
     marginLeft: 12,
+  },
+  analyticsIcon: {
+    marginLeft: 4,
+    padding: 8,
+    minWidth: 36,
+    minHeight: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  analyticsChartIcon: {
+    color: '$primaryBlue',
+    marginLeft: 12,
+  },
+  closeIcon: {
+    color: '$iconColor',
   },
 });

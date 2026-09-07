@@ -4,7 +4,8 @@ import EStyleSheet from 'react-native-extended-stylesheet';
 export default EStyleSheet.create({
   container: {
     paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingTop: 8,
+    paddingBottom: 56,
   } as ViewStyle,
   label: {
     fontSize: 16,
@@ -30,13 +31,14 @@ export default EStyleSheet.create({
   inputWrapper: {
     flex: 1,
     borderRadius: 16,
-    borderTopEndRadius: 16,
-    borderTopStartRadius: 16,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
     marginTop: 12,
     borderBottomColor: 'transparent',
     height: 44,
   } as ViewStyle,
   input: {
+    flex: 1,
     color: '$primaryDarkText',
   } as TextStyle,
   btnRemove: {
@@ -53,5 +55,13 @@ export default EStyleSheet.create({
   } as TextStyle,
   btnMain: {
     paddingHorizontal: 16,
+  } as ViewStyle,
+  separator: {
+    width: '80%',
+    height: EStyleSheet.hairlineWidth,
+    backgroundColor: '$primaryLightGray',
+    marginTop: 24,
+    marginBottom: 16,
+    alignSelf: 'center',
   } as ViewStyle,
 });

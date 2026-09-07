@@ -13,6 +13,7 @@ import ROUTES from '../../../constants/routeNames';
 
 import { useAppSelector } from '../../../hooks';
 import { getResizedAvatar } from '../../../utils/image';
+import { selectCurrentAccountName } from '../../../redux/selectors';
 
 import DEFAULT_IMAGE from '../../../assets/avatar_default.png';
 
@@ -24,7 +25,7 @@ import DEFAULT_IMAGE from '../../../assets/avatar_default.png';
 interface UserAvatarProps {
   username: string;
   avatarUrl?: string;
-  size?: 'xl' | 'xxl';
+  size?: string;
   style?: ViewStyle;
   disableSize?: boolean;
   noAction?: boolean;
@@ -40,13 +41,12 @@ const UserAvatarView = ({
   noAction,
   isLoading,
 }: UserAvatarProps) => {
-  const curUsername = useAppSelector((state) => state.account.currentAccount.name);
+  const curUsername = useAppSelector(selectCurrentAccountName);
   const avatarCacheStamp = useAppSelector((state) => state.ui.avatarCacheStamp);
 
   // Component Functions
   const _handleOnAvatarPress = (username: string) => {
-    const name = ROUTES.SCREENS.PROFILE;
-    RootNavigation.navigate(name, { username });
+    RootNavigation.navigate({ name: ROUTES.SCREENS.PROFILE, params: { username }, key: username });
   };
 
   const uri = avatarUrl || getResizedAvatar(username, 'large');
@@ -59,7 +59,7 @@ const UserAvatarView = ({
       }
     : DEFAULT_IMAGE;
 
-  let _size: number;
+  let _size = 32;
   if (!disableSize) {
     _size = 32;
     if (size === 'xl') {
@@ -67,6 +67,9 @@ const UserAvatarView = ({
     }
     if (size === 'xxl') {
       _size = 128;
+    }
+    if (size === 'small') {
+      _size = 18;
     }
   }
 

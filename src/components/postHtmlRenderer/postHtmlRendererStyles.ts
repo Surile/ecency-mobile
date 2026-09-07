@@ -21,6 +21,22 @@ export default EStyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     flexWrap: 'wrap',
+    textAlignVertical: 'center',
+  } as TextStyle,
+  h1: {
+    fontSize: 24,
+  } as TextStyle,
+  h2: {
+    fontSize: 20,
+  } as TextStyle,
+  h3: {
+    fontSize: 18,
+  } as TextStyle,
+  h4: {
+    fontSize: 16,
+  } as TextStyle,
+  h5: {
+    fontSize: 15,
   } as TextStyle,
   h6: {
     fontSize: 14,
@@ -109,6 +125,11 @@ export default EStyleSheet.create({
     justifyContent: 'center',
     backgroundColor: '$darkIconColor',
   },
+  embeddedVideoWrapper: {
+    alignSelf: 'center',
+    marginLeft: 'auto',
+    marginRight: 'auto',
+  } as ViewStyle,
   playButton: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -127,5 +148,21 @@ export default EStyleSheet.create({
   },
   imageGalleryHeaderText: {
     color: '$primaryDarkText',
+  },
+  tagWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: EStyleSheet.hairlineWidth,
+    borderColor: '$iconColor',
+    paddingVertical: 2,
+    borderRadius: 20,
+    height: 18,
+    marginBottom: -3,
+  },
+  tagText: {
+    color: '$primaryBlue',
+    fontSize: 12,
+    marginHorizontal: 6,
+    marginTop: -2,
   },
 });

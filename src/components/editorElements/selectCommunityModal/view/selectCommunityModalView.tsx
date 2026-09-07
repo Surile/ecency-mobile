@@ -19,7 +19,8 @@ const SelectCommunityModalView = ({
   currentAccount,
   onCloseModal,
   intl,
-}) => {
+  showSubscribedOnly,
+}: any) => {
   const [sections, setSections] = useState<any[]>([]);
 
   useEffect(() => {
@@ -33,11 +34,16 @@ const SelectCommunityModalView = ({
       if (subscribedCommunities) {
         _sections.push({
           sectionTitle: intl.formatMessage({ id: 'editor.my_communities' }).toUpperCase(),
-          data: subscribedCommunities.map((item) => ({ name: item[0], title: item[1] })),
+          data: subscribedCommunities,
         });
       }
 
-      if (!topCommunities.isLoading && !topCommunities.error && topCommunities.data?.length > 0) {
+      if (
+        !showSubscribedOnly &&
+        !topCommunities.isLoading &&
+        !topCommunities.error &&
+        topCommunities.data?.length > 0
+      ) {
         _sections.push({
           sectionTitle: intl.formatMessage({ id: 'editor.top_communities' }).toUpperCase(),
           data: topCommunities.data,
@@ -57,7 +63,7 @@ const SelectCommunityModalView = ({
         backEnabled={true}
         onBackPress={onCloseModal}
       />
-      {!showSearchedCommunities && (
+      {!showSubscribedOnly && !showSearchedCommunities && (
         <>
           <Text style={[globalStyles.label, styles.title]}>
             {intl.formatMessage({ id: 'editor.my_blog' }).toUpperCase()}
@@ -74,17 +80,12 @@ const SelectCommunityModalView = ({
     </>
   );
 
-  const _renderSectionHeader = ({ section }) => (
+  const _renderSectionHeader = ({ section }: any) => (
     <Text style={[globalStyles.label, styles.title]}>{section.sectionTitle}</Text>
   );
 
-  const _renderItem = ({ item, index, separators }) => (
-    <CommunityCard
-      community={item}
-      key={index.toString()}
-      onPress={onPressCommunity}
-      separators={separators}
-    />
+  const _renderItem = ({ item, index }: any) => (
+    <CommunityCard community={item} key={index.toString()} onPress={onPressCommunity} />
   );
 
   return (
@@ -96,7 +97,7 @@ const SelectCommunityModalView = ({
       ListHeaderComponent={_listHeader}
       renderSectionHeader={_renderSectionHeader}
       renderItem={_renderItem}
-      keyExtractor={(item, index) => index.toString()}
+      keyExtractor={(item, index) => (item.id || item.name || String(index)).toString()}
       showsVerticalScrollIndicator={false}
     />
   );

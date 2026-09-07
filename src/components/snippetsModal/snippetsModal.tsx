@@ -4,23 +4,22 @@ import { useIntl } from 'react-intl';
 import { MainButton } from '..';
 import styles from './snippetsModalStyles';
 
-import SnippetEditorModal, {
-  SnippetEditorModalRef,
-} from '../snippetEditorModal/snippetEditorModal';
+import SnippetEditorModal from '../snippetEditorModal/snippetEditorModal';
 import SnippetItem from './snippetItem';
 import { Snippet } from '../../models';
 import { useAppSelector } from '../../hooks';
 import { editorQueries } from '../../providers/queries';
+import { selectIsLoggedIn } from '../../redux/selectors';
 
 interface SnippetsModalProps {
   handleOnSelect: (snippetText: string) => void;
 }
 
 const SnippetsModal = ({ handleOnSelect }: SnippetsModalProps) => {
-  const editorRef = useRef<SnippetEditorModalRef>(null);
+  const editorRef = useRef<any>(null);
   const intl = useIntl();
 
-  const isLoggedIn = useAppSelector((state) => state.application.isLoggedIn);
+  const isLoggedIn = useAppSelector(selectIsLoggedIn);
 
   const snippetsQuery = editorQueries.useSnippetsQuery();
 
@@ -81,14 +80,22 @@ const SnippetsModal = ({ handleOnSelect }: SnippetsModalProps) => {
     );
   };
 
+  const handleLoadMore = () => {
+    if (snippetsQuery.hasNextPage && !snippetsQuery.isFetchingNextPage) {
+      snippetsQuery.fetchNextPage();
+    }
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.bodyWrapper}>
         <FlatList
-          data={snippetsQuery.data}
-          keyExtractor={(item, index) => index.toString()}
+          data={snippetsQuery.data as any}
+          keyExtractor={(item) => item.id}
           renderItem={_renderItem}
           ListEmptyComponent={_renderEmptyContent}
+          onEndReached={handleLoadMore}
+          onEndReachedThreshold={0.5}
           refreshControl={
             <RefreshControl
               refreshing={snippetsQuery.isFetching}

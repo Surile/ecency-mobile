@@ -7,12 +7,14 @@ import { useNavigation } from '@react-navigation/native';
 import { ScrollView } from 'react-native-gesture-handler';
 import EStyleSheet from 'react-native-extended-stylesheet';
 import { openInbox } from 'react-native-email-link';
+import { signUp } from '@ecency/sdk';
 import styles from '../styles/registerAccountModalStyles';
 import { InAppPurchaseContainer } from '../../../containers';
 import { Icon, MainButton, Modal, PostCardPlaceHolder, TextButton } from '../../../components';
 import LOGO_ESTM from '../../../assets/esteemcoin_boost.png';
-import { signUp } from '../../../providers/ecency/ecency';
 import ROUTES from '../../../constants/routeNames';
+import TurnstileWebView from './turnstileWebView';
+import { getUsernameError, USERNAME_ERROR_MESSAGE_IDS } from '../../../utils/usernameValidation';
 
 type Props = {
   username: string;
@@ -35,6 +37,14 @@ export const RegisterAccountModal = forwardRef(({ username, email, refUsername }
   const [disableFree, setDisableFree] = useState(false);
   const [isRegistering, setIsRegistering] = useState(false);
   const [isRegistered, setIsRegistered] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState('');
+  // Bump to remount the Turnstile widget for a fresh (single-use) token after a failure.
+  const [captchaKey, setCaptchaKey] = useState(0);
+
+  const _resetCaptcha = () => {
+    setCaptchaToken('');
+    setCaptchaKey((k) => k + 1);
+  };
 
   useImperativeHandle(ref, () => ({
     showModal: ({ purchaseOnly }: { purchaseOnly: boolean } = { purchaseOnly: false }) => {
@@ -42,6 +52,8 @@ export const RegisterAccountModal = forwardRef(({ username, email, refUsername }
       setIsRegistered(false);
       setIsRegistering(false);
       setDisableFree(purchaseOnly);
+      // Start each modal session with a fresh challenge — never reuse a prior token.
+      _resetCaptcha();
     },
   }));
 
@@ -50,33 +62,66 @@ export const RegisterAccountModal = forwardRef(({ username, email, refUsername }
     openInbox();
   };
 
-  const _handleOnPressRegister = () => {
+  // Last-line guard before either signup path runs. The register screen already
+  // blocks a chain-invalid username, but this modal can also be opened directly
+  // (e.g. the purchaseOnly deep link), so re-check here so a name the blockchain
+  // would reject (the buyer is still charged for the paid path) never reaches the
+  // backend.
+  const _isUsernameCreatable = () => {
+    const errorCode = getUsernameError(_username);
+    if (errorCode) {
+      Alert.alert(
+        intl.formatMessage({ id: 'alert.fail' }),
+        intl.formatMessage({ id: USERNAME_ERROR_MESSAGE_IDS[errorCode] }),
+      );
+      return false;
+    }
+    return true;
+  };
+
+  const _handleOnPressRegister = async () => {
+    if (!_isUsernameCreatable()) {
+      return;
+    }
     setIsRegistering(true);
 
-    signUp(_username, email, refUsername)
-      .then((result) => {
-        if (result) {
-          setIsRegistered(true);
-        }
-        setIsRegistering(false);
-      })
-      .catch((err) => {
-        let title = intl.formatMessage({ id: 'alert.fail' });
-        let body = intl.formatMessage({ id: 'alert.unknow_error' });
+    try {
+      const result = await signUp(_username, email, refUsername, captchaToken);
+      if (result?.status >= 200 && result?.status < 300) {
+        setIsRegistered(true);
+      } else {
+        Alert.alert(
+          intl.formatMessage({ id: 'alert.fail' }),
+          intl.formatMessage({ id: 'alert.unknow_error' }),
+        );
+        setIsRegistered(false);
+        _resetCaptcha();
+      }
+    } catch (err) {
+      const title = intl.formatMessage({ id: 'alert.fail' });
+      let body = intl.formatMessage({ id: 'alert.unknow_error' });
 
-        if (get(err, 'response.status') === 500) {
-          title = intl.formatMessage({ id: 'alert.fail' });
-          body = intl.formatMessage({ id: 'register.500_error' });
-        } else if (get(err, 'response.data.message')) {
-          title = intl.formatMessage({ id: 'alert.fail' });
-          body = intl.formatMessage(
-            { id: 'register.error_message' },
-            { message: err.response.data.message },
-          );
-        }
-        Alert.alert(title, body);
-        setIsRegistering(false);
-      });
+      const status = get(err, 'status') || get(err, 'response.status');
+      const message = get(err, 'data.message') || get(err, 'response.data.message');
+
+      if (status === 500) {
+        body = intl.formatMessage({ id: 'register.500_error' });
+      } else if (message) {
+        // The backend returns a numeric `code` plus an English `message`. Prefer a
+        // localized, code-specific string so non-English users get a translated body,
+        // and fall back to the backend message (as defaultMessage) for any locale that
+        // hasn't translated the code, or any code we don't map. The backend message is
+        // already a complete sentence, so the fallback is always coherent on its own.
+        const code = get(err, 'data.code') || get(err, 'response.data.code');
+        body = code
+          ? intl.formatMessage({ id: `register.error_codes.${code}`, defaultMessage: message })
+          : message;
+      }
+      Alert.alert(title, body);
+      _resetCaptcha();
+    } finally {
+      setIsRegistering(false);
+    }
   };
 
   const _handleOnPurchaseSuccess = () => {
@@ -84,7 +129,7 @@ export const RegisterAccountModal = forwardRef(({ username, email, refUsername }
     setIsRegistering(false);
   };
 
-  const _handleOnPurchaseFailure = (error) => {
+  const _handleOnPurchaseFailure = (error: any) => {
     Alert.alert(
       intl.formatMessage({ id: 'alert.fail' }),
       `${intl.formatMessage({ id: 'register.register_fail' })}\n${error.message}`,
@@ -140,7 +185,7 @@ export const RegisterAccountModal = forwardRef(({ username, email, refUsername }
     </View>
   );
 
-  const _renderCard = ({ titleId, descriptionId, btnTitle, onPress }) => {
+  const _renderCard = ({ titleId, descriptionId, btnTitle, onPress, extra, disabled }: any) => {
     return (
       <View style={styles.cardContainer}>
         <Text style={styles.title}>
@@ -155,18 +200,19 @@ export const RegisterAccountModal = forwardRef(({ username, email, refUsername }
             })}
           </Text>
         </View>
+        {extra}
         <TextButton
           textStyle={styles.buttonText}
           onPress={onPress}
           style={styles.button}
-          disabled={isRegistering}
+          disabled={disabled !== undefined ? disabled : isRegistering}
           text={btnTitle}
         />
       </View>
     );
   };
 
-  const _renderRegisterOptions = ({ productList, buyItem, unconsumedPurchases }) => {
+  const _renderRegisterOptions = ({ productList, buyItem, unconsumedPurchases }: any) => {
     return isRegistered || isRegistering ? (
       _renderIntermediateComponent()
     ) : (
@@ -175,27 +221,38 @@ export const RegisterAccountModal = forwardRef(({ username, email, refUsername }
           _renderCard({
             titleId: 'free_account.title',
             descriptionId: 'free_account.desc',
-
             btnTitle: intl.formatMessage({ id: 'free_account.btn_register' }),
             onPress: _handleOnPressRegister,
+            extra: (
+              <TurnstileWebView
+                key={captchaKey}
+                onVerify={setCaptchaToken}
+                onExpire={() => setCaptchaToken('')}
+                onError={_resetCaptcha}
+              />
+            ),
+            disabled: !captchaToken,
           })}
 
-        {productList.map((product) =>
+        {productList.map((product: any) =>
           _renderCard({
             titleId: 'buy_account.title',
             descriptionId: 'buy_account.desc',
-            btnTitle: unconsumedPurchases.find((p) => p.productId === '999accounts')
+            btnTitle: unconsumedPurchases.find((p: any) => p.productId === '999accounts')
               ? intl.formatMessage({ id: 'buy_account.claim' })
               : intl.formatMessage(
                   { id: 'buy_account.btn_register' },
                   {
-                    price: Platform.select({
-                      ios: product.localizedPrice,
-                      android: product.oneTimePurchaseOfferDetails?.formattedPrice,
-                    }),
+                    // src/providers/iap fills localizedPrice on both platforms;
+                    // the Android-only oneTimePurchaseOfferDetails shape does not
+                    // exist in the Billing 9 product payload.
+                    price: product.localizedPrice,
                   },
                 ),
             onPress: () => {
+              if (!_isUsernameCreatable()) {
+                return;
+              }
               setIsRegistering(true);
               buyItem(product.productId);
             },
@@ -226,7 +283,7 @@ export const RegisterAccountModal = forwardRef(({ username, email, refUsername }
             handleOnPurchaseSuccess={_handleOnPurchaseSuccess}
             handleOnPurchaseFailure={_handleOnPurchaseFailure}
           >
-            {({ buyItem, productList, isLoading, unconsumedPurchases }) => (
+            {({ buyItem, productList, isLoading, unconsumedPurchases }: any) => (
               <>
                 {isLoading ? (
                   <PostCardPlaceHolder />

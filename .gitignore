@@ -33,7 +33,8 @@ local.properties
 .cxx/
 *.keystore
 !debug.keystore
-
+.kotlin/
+android/.settings/
 # node.js
 #
 node_modules/
@@ -83,3 +84,7 @@ package-lock.json
 my-release-key.keystore
 gradle.properties
 ios/Ecency.xcworkspace/xcuserdata/f.xcuserdatad/UserInterfaceState.xcuserstate
+
+.env.local
+
+.claude/settings.local.json

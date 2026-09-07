@@ -24,12 +24,11 @@ export interface TransferAmountInputSectionProps {
   setRecurrence: (value: string) => void;
   executions: string;
   setExecutions: (value: string) => void;
-  hsTransfer: boolean;
   transferType: string;
-  selectedAccount: any;
   fundType: any;
-  currentAccountName: string;
   disableMinimum?: boolean;
+  startDate?: string | null;
+  onDelete?: () => void;
 }
 
 export const RECURRENCE_TYPES = [
@@ -50,7 +49,7 @@ export const RECURRENCE_TYPES = [
   },
 ];
 
-const TransferAmountInputSection = ({
+const TransferAmountInputSection: React.FC<TransferAmountInputSectionProps> = ({
   balance,
   getAccountsWithUsername,
   setIsUsernameValid,
@@ -68,53 +67,61 @@ const TransferAmountInputSection = ({
   executions,
   setExecutions,
   startDate,
-  onNext,
+  onDelete,
 }) => {
   const intl = useIntl();
 
-  const dpRef = useRef();
+  const dpRef = useRef<any>(null);
+  const inputRefs = useRef<Record<string, any>>({});
 
-  const _handleOnChange = (state, val) => {
+  const _getStateValue = (state: string) =>
+    state === 'destination'
+      ? destination
+      : state === 'amount'
+      ? amount
+      : state === 'memo'
+      ? memo
+      : state === 'executions'
+      ? executions
+      : '';
+
+  const _handleOnChange = (state: any, val: any) => {
     let newValue = val.toString();
 
     if (newValue.includes(',')) {
       newValue = val.replace(',', '.');
     }
     if (state === 'amount') {
-      if (parseFloat(Number(newValue)) <= parseFloat(balance)) {
+      if (parseFloat(Number(newValue) as any) <= parseFloat(balance as any)) {
         setAmount(newValue);
+      } else {
+        // Reject over-balance amount: snap field back to the last accepted value.
+        // setAmount(amount) would bail out (same primitive), so write to the native
+        // field directly — the next render still has value={amount} so they stay in sync.
+        inputRefs.current[state]?.setNativeProps({ text: amount || '' });
       }
     } else if (state === 'destination') {
-      getAccountsWithUsername(val).then((res) => {
-        console.log(res);
-
+      getAccountsWithUsername(val).then((res: any) => {
         const isValid = res.includes(val);
 
         setIsUsernameValid(isValid);
       });
       setDestination(newValue);
     } else if (state === 'memo') {
-      setMemo(newValue);
+      setMemo(val);
     } else if (state === 'executions') {
       setExecutions(val);
     }
   };
 
-  const _renderInput = (placeholder, state, keyboardType, isTextArea) => (
+  const _renderInput = (placeholder: any, state: any, keyboardType: any, isTextArea: any) => (
     <TextInput
-      style={[isTextArea ? styles.textarea : styles.input]}
+      innerRef={(r: any) => {
+        inputRefs.current[state] = r;
+      }}
+      style={[isTextArea ? styles.textarea : styles.input] as any}
       onChangeText={(newVal) => _handleOnChange(state, newVal)}
-      value={
-        state === 'destination'
-          ? destination
-          : state === 'amount'
-          ? amount
-          : state === 'memo'
-          ? memo
-          : state === 'executions'
-          ? executions
-          : ''
-      }
+      value={_getStateValue(state)}
       placeholder={placeholder}
       placeholderTextColor="#c1c5c7"
       autoCapitalize="none"
@@ -125,7 +132,7 @@ const TransferAmountInputSection = ({
   );
 
   const [recurrenceIndex, setRecurrenceIndex] = useState(
-    RECURRENCE_TYPES.findIndex((r) => r.hours === recurrence),
+    RECURRENCE_TYPES.findIndex((r) => r.hours === (recurrence as any)),
   );
 
   useEffect(() => {
@@ -134,7 +141,7 @@ const TransferAmountInputSection = ({
     setRecurrenceIndex(newSelectedIndex);
 
     if (newSelectedIndex > -1) {
-      setRecurrence(RECURRENCE_TYPES[newSelectedIndex].hours);
+      setRecurrence(RECURRENCE_TYPES[newSelectedIndex].hours as any);
     }
 
     if (dpRef?.current) {
@@ -145,15 +152,17 @@ const TransferAmountInputSection = ({
   const _handleRecurrenceChange = useCallback((index: number) => {
     setRecurrenceIndex(index);
 
-    setRecurrence(RECURRENCE_TYPES[index].hours);
+    setRecurrence(RECURRENCE_TYPES[index].hours as any);
   }, []);
 
   const _onDelete = () => {
-    onNext(true);
+    if (onDelete) {
+      onDelete();
+    }
   };
 
-  const _renderDescription = (text) => <Text style={styles.description}>{text}</Text>;
-  const _renderCenterDescription = (text, extraStyles = {}) => (
+  const _renderDescription = (text: any) => <Text style={styles.description}>{text}</Text>;
+  const _renderCenterDescription = (text: any, extraStyles = {}) => (
     <Text style={[styles.centerDescription, extraStyles]}>{text}</Text>
   );
 
@@ -196,7 +205,7 @@ const TransferAmountInputSection = ({
             {_renderDescription(
               `${intl.formatMessage({
                 id: 'transfer.amount_desc',
-              })} ${balance} ${fundType === 'ESTM' ? 'Points' : fundType}`,
+              })} ${balance} ${fundType === 'POINT' ? 'Points' : fundType}`,
             )}
           </TouchableOpacity>
         )}
@@ -215,7 +224,7 @@ const TransferAmountInputSection = ({
                 options={RECURRENCE_TYPES.map((k) => intl.formatMessage({ id: k.intlId }))}
                 defaultText={intl.formatMessage({ id: 'transfer.recurrence_placeholder' })}
                 selectedOptionIndex={recurrenceIndex}
-                onSelect={(index) => _handleRecurrenceChange(index)}
+                onSelect={(index: any) => _handleRecurrenceChange(index)}
                 dropdownRef={dpRef}
               />
             )}
@@ -233,13 +242,10 @@ const TransferAmountInputSection = ({
           />
         </>
       )}
-      {(transferType === TransferTypes.POINTS ||
-        transferType === TransferTypes.TRANSFER_TOKEN ||
+      {(transferType === TransferTypes.ECENCY_POINT_TRANSFER ||
+        transferType === TransferTypes.TRANSFER ||
         transferType === TransferTypes.RECURRENT_TRANSFER ||
-        transferType === TransferTypes.TRANSFER_TO_SAVINGS ||
-        transferType === TransferTypes.TRANSFER_ENGINE ||
-        transferType === TransferTypes.TRANSFER_SPK ||
-        transferType === TransferTypes.TRANSFER_LARYNX) && (
+        transferType === TransferTypes.TRANSFER_TO_SAVINGS) && (
         <TransferFormItem
           label={intl.formatMessage({ id: 'transfer.memo' })}
           rightComponent={() =>
@@ -254,7 +260,8 @@ const TransferAmountInputSection = ({
         />
       )}
 
-      {(transferType === TransferTypes.POINTS || transferType === TransferTypes.TRANSFER_TOKEN) && (
+      {(transferType === TransferTypes.ECENCY_POINT_TRANSFER ||
+        transferType === TransferTypes.TRANSFER) && (
         <TransferFormItem
           rightComponentStyle={styles.transferItemRightStyle}
           containerStyle={styles.transferItemContainer}
